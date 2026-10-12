@@ -1,6 +1,5 @@
 --[[
     ⚡ BOLT HUB ⚡
-    v3.1.0 — full expansion · sky-tier · real bolt
 ]]
 
 -- ─── Services ───
@@ -15,6 +14,7 @@ local TextChatService   = game:GetService("TextChatService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local VirtualUser       = game:GetService("VirtualUser")
 local VirtualInput      = game:GetService("VirtualInputManager")
+local MarketplaceService = game:GetService("MarketplaceService")
 
 local LP     = Players.LocalPlayer
 local Mouse  = LP:GetMouse()
@@ -28,6 +28,9 @@ local setro    = setreadonly or make_writeable or function() end
 local newc     = newcclosure or function(f) return f end
 local unpack   = table.unpack or unpack
 local hasHookMethod = type(hookmetamethod) == "function"
+local hasReplicateSignal = type(replicatesignal) == "function"
+local hasFireSignal = type(firesignal) == "function"
+local hasCloneRef = type(cloneref) == "function"
 
 if genv.BoltHub then pcall(function() genv.BoltHub:Destroy() end) end
 if genv.BoltIcon then pcall(function() genv.BoltIcon:Destroy() end) end
@@ -76,27 +79,18 @@ local function Pad(p, t, r, b, l)
 end
 
 -- ══════════════════════════════════════════════
---   BOLT SHAPE (real lightning bolt silhouette)
+--   BOLT SHAPE
 -- ══════════════════════════════════════════════
--- Each row {startCol, endCol} on a 12-wide grid.
--- Upper section slants right-to-left, kink at row 6, lower tapers to a point.
 local BOLT_ROWS = {
-    {6, 11},
-    {5, 10},
-    {4, 9},
-    {3, 8},
-    {2, 7},
-    {5, 10},
-    {4, 9},
-    {3, 8},
-    {2, 7},
-    {1, 5},
-    {0, 3},
-    {0, 1},
+    {6, 11}, {5, 10}, {4, 9}, {3, 8}, {2, 7},
+    {3, 9}, {2, 8}, {1, 7}, {0, 6}, {0, 3}, {0, 1},
 }
 
 local function drawBolt(parent, size)
-    local cell = size / 12
+    local rows = #BOLT_ROWS
+    local cell = size / rows
+    local cols = 12
+    local colW = size / cols
     local Bolt = C("Frame", {
         Size = UDim2.new(0, size, 0, size),
         Position = UDim2.new(0.5, -size/2, 0.5, -size/2),
@@ -105,10 +99,10 @@ local function drawBolt(parent, size)
     })
     for i, r in ipairs(BOLT_ROWS) do
         local c0, c1 = r[1], r[2]
-        local w = (c1 - c0 + 1) * cell
+        local w = (c1 - c0 + 1) * colW
         C("Frame", {
-            Size = UDim2.new(0, w, 0, cell + 0.5),
-            Position = UDim2.new(0, c0 * cell, 0, (i - 1) * cell),
+            Size = UDim2.new(0, w, 0, cell + 0.6),
+            Position = UDim2.new(0, c0 * colW, 0, (i - 1) * cell),
             BackgroundColor3 = BLACK,
             BorderSizePixel = 0,
             Parent = Bolt
@@ -132,7 +126,7 @@ local function SafeNO(part)
     pcall(function() if not part.Anchored then part:SetNetworkOwner(LP) end end)
 end
 
--- ─── Log buffer ───
+-- ─── Log ───
 local LogBuffer = {}
 local LogSink = nil
 local function notify(title, text, dur)
@@ -145,6 +139,388 @@ local function notify(title, text, dur)
             Title = title or "BOLT", Text = text or "", Duration = dur or 3
         })
     end)
+end
+
+-- ══════════════════════════════════════════════
+--   ═══ THE GOD-TIER FAKER ENGINE ═══
+-- ══════════════════════════════════════════════
+
+local FakeData = {
+    gamepasses = {},
+    products   = {},
+    seen       = {},
+    listeners  = {},
+    globalOn   = false,   -- global fake state (everything returns true)
+    autoFake   = false,   -- auto-fake on prompt detection
+    hookedMP   = false,   -- marketplace service already hooked?
+}
+
+-- Fetch product info from Roblox
+local function fetchProductInfo(id, isGamepass)
+    local infoType = isGamepass and Enum.InfoType.GamePass or Enum.InfoType.Product
+    local ok, info = pcall(function()
+        return MarketplaceService:GetProductInfo(id, infoType)
+    end)
+    if ok and info and type(info) == "table" then
+        return info.Name or ("Unknown " .. (isGamepass and "Gamepass" or "Product")), info.PriceInRobux
+    end
+    return "Unknown " .. (isGamepass and "Gamepass" or "Product"), nil
+end
+
+local function addFakeEntry(tbl, id, name, source, isGamepass)
+    id = tonumber(id)
+    if not id or id < 1e5 or id > 1e13 then return end
+    local key = (isGamepass and "gpass:" or "prod:") .. tostring(id)
+    if FakeData.seen[key] then return end
+    FakeData.seen[key] = true
+
+    local displayName = name
+    local price
+    if not displayName or displayName == "Prompt" or displayName == "Check"
+       or displayName == "Info" or displayName == "Remote" then
+        displayName, price = fetchProductInfo(id, isGamepass)
+    end
+
+    local entry = {
+        id = id,
+        name = displayName or ("Unknown " .. (isGamepass and "Gamepass" or "Product")),
+        price = price,
+        source = source or "?",
+        isGamepass = isGamepass
+    }
+    table.insert(tbl, entry)
+    notify("SCAN", (isGamepass and "Gamepass" or "Product") .. " " .. id .. " · " .. entry.name)
+    for _, fn in ipairs(FakeData.listeners) do pcall(fn, entry) end
+
+    -- Auto-fake if enabled
+    if FakeData.autoFake then
+        task.spawn(function()
+            if isGamepass then
+                _G.BoltFakePurchase(id, nil)
+            else
+                _G.BoltFakePurchase(nil, id)
+            end
+        end)
+    end
+end
+
+-- ═══ THE BLAST — fires every known purchase method simultaneously ═══
+local function fakePurchase(gamepassId, productId)
+    local firedCount = 0
+
+    -- ═══ GAMEPASS PATH ═══
+    if gamepassId then
+        gamepassId = tonumber(gamepassId)
+        if not gamepassId then return false end
+
+        -- Fire all variants immediately
+        local function blast()
+            -- Variant 1: replicatesignal with LP instance
+            if hasReplicateSignal then
+                pcall(function()
+                    replicatesignal(MarketplaceService.PromptGamePassPurchaseFinished, LP, gamepassId, true)
+                    firedCount = firedCount + 1
+                end)
+                -- Variant 2: replicatesignal with UserId
+                pcall(function()
+                    replicatesignal(MarketplaceService.PromptGamePassPurchaseFinished, LP.UserId, gamepassId, true)
+                end)
+                -- Variant 3: 2-arg form (some executors)
+                pcall(function()
+                    replicatesignal(MarketplaceService.PromptGamePassPurchaseFinished, LP, gamepassId)
+                end)
+            end
+
+            -- Variant 4: direct Signal call
+            pcall(function()
+                MarketplaceService:SignalPromptGamePassPurchaseFinished(LP.UserId, gamepassId, true)
+            end)
+            pcall(function()
+                MarketplaceService:SignalPromptGamePassPurchaseFinished(LP, gamepassId, true)
+            end)
+
+            -- Variant 5: firesignal (local)
+            if hasFireSignal then
+                pcall(function()
+                    firesignal(MarketplaceService.PromptGamePassPurchaseFinished, LP, gamepassId, true)
+                end)
+            end
+        end
+
+        blast()
+        task.delay(0.05, blast)
+        task.delay(0.2, blast)
+        task.delay(0.5, blast)
+        task.delay(1.0, blast)
+
+        -- Fallback: also hook namecall for local checks
+        local mt = getrawmt and getrawmt(game)
+        if mt then
+            local old = mt.__namecall
+            pcall(function() setro(mt, false) end)
+            mt.__namecall = newc(function(self, ...)
+                local method = getnamecallmethod and getnamecallmethod() or ""
+                if method == "UserOwnsGamePassAsync" then
+                    local args = {...}
+                    if args[2] == gamepassId or args[1] == gamepassId
+                       or FakeData.globalOn then
+                        return true
+                    end
+                end
+                if method == "PlayerOwnsAsset" and FakeData.globalOn then
+                    return true
+                end
+                return old(self, ...)
+            end)
+            pcall(function() setro(mt, true) end)
+        end
+
+        notify("FAKE", "Blast fired " .. firedCount .. "× for gamepass " .. gamepassId)
+        return true
+    end
+
+    -- ═══ PRODUCT PATH ═══
+    if productId then
+        productId = tonumber(productId)
+        if not productId then return false end
+
+        local function blast()
+            if hasReplicateSignal then
+                pcall(function()
+                    replicatesignal(MarketplaceService.PromptProductPurchaseFinished, LP.UserId, productId, true)
+                    firedCount = firedCount + 1
+                end)
+                pcall(function()
+                    replicatesignal(MarketplaceService.PromptProductPurchaseFinished, LP, productId, true)
+                end)
+            end
+
+            pcall(function()
+                MarketplaceService:SignalPromptProductPurchaseFinished(LP.UserId, productId, true)
+            end)
+
+            if hasFireSignal then
+                pcall(function()
+                    firesignal(MarketplaceService.PromptProductPurchaseFinished, LP.UserId, productId, true)
+                end)
+            end
+
+            -- Also try PromptPurchaseFinished for the general case
+            if hasReplicateSignal then
+                pcall(function()
+                    replicatesignal(MarketplaceService.PromptPurchaseFinished, LP, productId, true)
+                end)
+            end
+        end
+
+        blast()
+        task.delay(0.05, blast)
+        task.delay(0.2, blast)
+        task.delay(0.5, blast)
+        task.delay(1.0, blast)
+
+        notify("FAKE", "Blast fired " .. firedCount .. "× for product " .. productId)
+        return true
+    end
+
+    return false
+end
+_G.BoltFakePurchase = fakePurchase
+
+-- ═══ DIRECT MARKETPLACE HOOK ═══
+-- Hooks the service itself, not just game metatable. Catches games that
+-- call MarketplaceService:UserOwnsGamePassAsync directly.
+local function installMarketplaceHooks()
+    if FakeData.hookedMP then return end
+    FakeData.hookedMP = true
+
+    local mt = getrawmt and getrawmt(MarketplaceService)
+    if not mt then
+        notify("FAKE", "MarketplaceService MT unavailable")
+        return
+    end
+
+    local oldIdx = mt.__index
+    local oldNC = mt.__namecall
+    pcall(function() setro(mt, false) end)
+
+    mt.__index = newc(function(self, key)
+        if key == "ProcessReceipt" and FakeData.globalOn then
+            return function()
+                return Enum.ProductPurchaseDecision.PurchaseGranted
+            end
+        end
+        if oldIdx then return oldIdx(self, key) end
+    end)
+
+    mt.__namecall = newc(function(self, ...)
+        local method = getnamecallmethod and getnamecallmethod() or ""
+        local args = {...}
+
+        -- UserOwnsGamePassAsync: if globalOn OR specific ID captured
+        if method == "UserOwnsGamePassAsync" then
+            if FakeData.globalOn then return true end
+            local id = args[2] or args[1]
+            if id then
+                for _, e in ipairs(FakeData.gamepasses) do
+                    if e.id == id then return true end
+                end
+            end
+        end
+
+        -- PlayerOwnsAsset / OwnsAsset
+        if method == "PlayerOwnsAsset" or method == "OwnsAsset" then
+            if FakeData.globalOn then return true end
+            local id = args[2] or args[1]
+            if id then
+                for _, e in ipairs(FakeData.gamepasses) do
+                    if e.id == id then return true end
+                end
+                for _, e in ipairs(FakeData.products) do
+                    if e.id == id then return true end
+                end
+            end
+        end
+
+        -- GetProductInfo / GetProductInfoAsync: mock owned
+        if method == "GetProductInfo" or method == "GetProductInfoAsync" then
+            local info = oldNC and oldNC(self, ...) or nil
+            if type(info) == "table" then
+                local id = args[1]
+                local owned = FakeData.globalOn
+                if not owned and id then
+                    for _, e in ipairs(FakeData.gamepasses) do
+                        if e.id == id then owned = true break end
+                    end
+                    if not owned then
+                        for _, e in ipairs(FakeData.products) do
+                            if e.id == id then owned = true break end
+                        end
+                    end
+                end
+                if owned then
+                    info.IsOwned = true
+                    info.IsForSale = true
+                    info.PriceInRobux = 0
+                end
+            end
+            return info
+        end
+
+        return oldNC and oldNC(self, ...) or nil
+    end)
+
+    pcall(function() setro(mt, true) end)
+    notify("FAKE", "MarketplaceService hooked directly")
+end
+
+-- ═══ PROMPT DETECTION + AUTO-FAKE ═══
+local function installDetectionHooks()
+    if genv.BoltDetectHooks then return end
+    genv.BoltDetectHooks = true
+
+    local mt = getrawmt and getrawmt(game)
+    if not mt then return end
+    local old = mt.__namecall
+    pcall(function() setro(mt, false) end)
+    mt.__namecall = newc(function(self, ...)
+        local method = getnamecallmethod and getnamecallmethod() or ""
+        local args = {...}
+
+        if method == "PromptGamePassPurchase" then
+            addFakeEntry(FakeData.gamepasses, args[2] or args[1], nil, "Prompt", true)
+        elseif method == "PromptProductPurchase" then
+            addFakeEntry(FakeData.products, args[2] or args[1], nil, "Prompt", false)
+        elseif method == "UserOwnsGamePassAsync" then
+            addFakeEntry(FakeData.gamepasses, args[2] or args[1], nil, "Check", true)
+        elseif method == "GetProductInfo" then
+            -- could be either; assume product
+            addFakeEntry(FakeData.products, args[1], nil, "Info", false)
+        end
+
+        return old(self, ...)
+    end)
+    pcall(function() setro(mt, true) end)
+
+    -- Also hook RemoteEvents for games that pass IDs through remotes
+    local hooked = {}
+    local function hookRemote(r)
+        if hooked[r] then return end
+        hooked[r] = true
+        local rmt = getrawmt and getrawmt(r)
+        if not rmt then return end
+        local rold = rmt.__namecall
+        pcall(function() setro(rmt, false) end)
+        rmt.__namecall = newc(function(self, ...)
+            local method = getnamecallmethod and getnamecallmethod() or ""
+            if method == "FireServer" then
+                local args = {...}
+                -- Look for numeric args in the 1e5 to 1e13 range
+                for _, a in ipairs(args) do
+                    if type(a) == "number" and a >= 1e5 and a < 1e13 then
+                        local nm = self.Name:lower()
+                        if nm:find("pass") or nm:find("gamepass") then
+                            addFakeEntry(FakeData.gamepasses, a, nil, "Remote:" .. self.Name, true)
+                        elseif nm:find("product") or nm:find("devproduct") then
+                            addFakeEntry(FakeData.products, a, nil, "Remote:" .. self.Name, false)
+                        end
+                    end
+                end
+            end
+            return rold(self, ...)
+        end)
+        pcall(function() setro(rmt, true) end)
+    end
+    for _, r in ipairs(ReplicatedStorage:GetDescendants()) do
+        if r:IsA("RemoteEvent") or r:IsA("RemoteFunction") then hookRemote(r) end
+    end
+
+    notify("BOLT", "Prompt Inspector + Remote Scanner active")
+end
+
+-- ═══ FAKE ALL DETECTED ═══
+local function fakeAllDetected()
+    local count = 0
+    for _, e in ipairs(FakeData.gamepasses) do
+        fakePurchase(e.id, nil)
+        count = count + 1
+    end
+    for _, e in ipairs(FakeData.products) do
+        fakePurchase(nil, e.id)
+        count = count + 1
+    end
+    notify("FAKE", "Fake blasted " .. count .. " items")
+end
+
+-- ═══ DEEP SCAN ═══
+local function deepScanFakes()
+    FakeData.gamepasses = {}
+    FakeData.products = {}
+    FakeData.seen = {}
+
+    local roots = { workspace, ReplicatedStorage, StarterGui, Players, Lighting }
+    for _, root in ipairs(roots) do
+        for _, obj in ipairs(root:GetDescendants()) do
+            if obj:IsA("NumberValue") or obj:IsA("IntValue") or obj:IsA("StringValue") then
+                local v = tonumber(obj.Value)
+                if v and v >= 1e5 and v < 1e13 then
+                    local n = obj.Name:lower()
+                    if n:find("pass") or n:find("gamepass") then
+                        addFakeEntry(FakeData.gamepasses, v, obj.Name, obj:GetFullName(), true)
+                    elseif n:find("product") or n:find("devproduct") then
+                        addFakeEntry(FakeData.products, v, obj.Name, obj:GetFullName(), false)
+                    end
+                end
+            elseif obj:IsA("ProximityPrompt") then
+                local t = (obj.ActionText or "") .. " " .. (obj.ObjectText or "")
+                for id in t:gmatch("%d%d%d%d%d+") do
+                    addFakeEntry(FakeData.gamepasses, tonumber(id), "Prompt", obj:GetFullName(), true)
+                end
+            end
+        end
+    end
+
+    notify("SCAN", "Deep scan · " .. #FakeData.gamepasses .. " gamepasses · " .. #FakeData.products .. " products")
 end
 
 -- ══════════════════════════════════════════════
@@ -314,10 +690,7 @@ local function Headless()
     end
 end
 
--- ══════════════════════════════════════════════
---   ACTIONS — PLAYER UPGRADES
--- ══════════════════════════════════════════════
-
+-- ─── PLAYER ───
 local function antiAfk(on)
     if genv.BoltAntiAfk then pcall(function() genv.BoltAntiAfk:Disconnect() end) genv.BoltAntiAfk = nil end
     if not on then return end
@@ -401,7 +774,6 @@ local function setShiftLock(state)
     notify("BOLT", state and "Shift lock on" or "Shift lock off")
 end
 
--- God mode (client-side — visual only, server still sees you take damage)
 local function godMode(on)
     if genv.BoltGod then pcall(function() genv.BoltGod:Disconnect() end) genv.BoltGod = nil end
     if not on then return end
@@ -411,7 +783,6 @@ local function godMode(on)
     notify("BOLT", "God mode on (client-side)")
 end
 
--- Health regen
 local function healthRegen(on)
     if genv.BoltRegen then pcall(function() genv.BoltRegen:Disconnect() end) genv.BoltRegen = nil end
     if not on then return end
@@ -422,31 +793,23 @@ local function healthRegen(on)
     end)
 end
 
--- Auto clicker
 local function autoClicker(on, cps)
     if genv.BoltClick then pcall(function() genv.BoltClick:Disconnect() end) genv.BoltClick = nil end
-    if not on then return end
+    if not on then genv.BoltAutoClick = false return end
     genv.BoltCps = cps or genv.BoltCps or 10
+    genv.BoltAutoClick = true
     task.spawn(function()
-        while genv.BoltCps and genv.BoltCps > 0 do
-            if genv.BoltAutoClick then
-                pcall(function()
-                    VirtualInput:SendMouseButtonEvent(0, 0, 0, true, game, 1)
-                    VirtualInput:SendMouseButtonEvent(0, 0, 0, false, game, 1)
-                end)
-            end
+        while genv.BoltAutoClick do
+            pcall(function()
+                VirtualInput:SendMouseButtonEvent(0, 0, 0, true, game, 1)
+                VirtualInput:SendMouseButtonEvent(0, 0, 0, false, game, 1)
+            end)
             task.wait(1 / (genv.BoltCps or 10))
         end
     end)
-    genv.BoltAutoClick = true
     notify("BOLT", "Auto clicker @ " .. genv.BoltCps .. " cps")
 end
-local function stopAutoClicker()
-    genv.BoltAutoClick = false
-    notify("BOLT", "Auto clicker off")
-end
 
--- Follow player
 local function followPlayer(name)
     if genv.BoltFollow then pcall(function() genv.BoltFollow:Disconnect() end) genv.BoltFollow = nil end
     if not name or name == "" then return end
@@ -458,14 +821,11 @@ local function followPlayer(name)
     genv.BoltFollow = RunService.Heartbeat:Connect(function()
         local hrp = GetHRP()
         local tHRP = target.Character and target.Character:FindFirstChild("HumanoidRootPart")
-        if hrp and tHRP then
-            hrp.CFrame = tHRP.CFrame * CFrame.new(0, 0, 5)
-        end
+        if hrp and tHRP then hrp.CFrame = tHRP.CFrame * CFrame.new(0, 0, 5) end
     end)
     notify("BOLT", "Following " .. target.Name)
 end
 
--- Spectate player
 local function spectate(name)
     if not name or name == "" then return end
     local target
@@ -479,25 +839,19 @@ local function spectate(name)
     end
 end
 
--- FPS unlock
 local function fpsUnlock()
-    pcall(function()
-        setfpscap(1000)
-        notify("BOLT", "FPS unlocked")
-    end)
-    if not pcall(function() setfpscap(1000) end) then
-        notify("BOLT", "setfpscap not available on this executor")
-    end
+    local ok = pcall(function() setfpscap(1000) end)
+    notify("BOLT", ok and "FPS unlocked" or "setfpscap not supported")
 end
 
--- Character scale
 local function setScale(mult)
     local c = GetChar() if not c then return end
     for _, d in ipairs(c:GetDescendants()) do
         if d:IsA("BasePart") and d.Name ~= "HumanoidRootPart" then
-            local orig = d:GetAttribute("BoltOrigSize") or d.Size
-            if not d:GetAttribute("BoltOrigSize") then d:SetAttribute("BoltOrigSize", orig) end
-            d.Size = orig * mult
+            if not d:GetAttribute("BoltOrigSize") then
+                d:SetAttribute("BoltOrigSize", d.Size)
+            end
+            d.Size = d:GetAttribute("BoltOrigSize") * mult
         end
     end
     notify("BOLT", "Scale ×" .. mult)
@@ -513,18 +867,7 @@ local function resetScale()
     end
 end
 
--- ══════════════════════════════════════════════
---   ACTIONS — VR
--- ══════════════════════════════════════════════
-
-local function vrTune(field, value)
-    pcall(function() LP[field] = value end)
-end
-
--- ══════════════════════════════════════════════
---   ACTIONS — ANTI-CHEAT
--- ══════════════════════════════════════════════
-
+-- ─── ANTI-CHEAT ───
 local function BypassKick()
     local mt = getrawmt and getrawmt(game)
     if not mt then notify("BOLT", "metatable access unavailable") return end
@@ -554,20 +897,6 @@ local function feServerSideAntiKick()
         end)
         pcall(function() setro(mt, true) end)
     end
-    local mtFire = getrawmt and getrawmt(ReplicatedStorage)
-    if mtFire then
-        pcall(function() setro(mtFire, false) end)
-        local oldFire = mtFire.__namecall
-        mtFire.__namecall = newc(function(self, ...)
-            local method = getnamecallmethod and getnamecallmethod()
-            if method == "FireServer" then
-                local first = select(1, ...)
-                if type(first) == "string" and (first:lower():find("kick") or first:lower():find("ban")) then return end
-            end
-            return oldFire(self, ...)
-        end)
-        pcall(function() setro(mtFire, true) end)
-    end
     genv.BoltFeKick = true
     notify("BOLT", "FE Serverside AntiKick active")
 end
@@ -589,10 +918,6 @@ local function adonisBypass()
         local low = method:lower()
         for _, p in ipairs(pfx) do
             if low:sub(1, #p) == p then return end
-        end
-        if method == "FireServer" and typeof(self) == "Instance" then
-            local nm = self.Name:lower()
-            if nm:find("adonis") or nm:find("detect") or nm:find("ban") or nm:find("kick") then return end
         end
         return old(self, ...)
     end)
@@ -616,10 +941,7 @@ local function stopLagback(on)
     notify("BOLT", "Lagback protection on")
 end
 
--- ══════════════════════════════════════════════
---   DEBUG
--- ══════════════════════════════════════════════
-
+-- ─── DEBUG ───
 local function openConsole()
     StarterGui:SetCore("DevConsoleVisible", true)
     notify("BOLT", "Console opened")
@@ -671,220 +993,10 @@ local function remoteLogger(on)
 end
 
 -- ══════════════════════════════════════════════
---   SCANNER
--- ══════════════════════════════════════════════
-local Scanner = { found = {}, seen = {}, listeners = {} }
-
-local function scanAdd(kind, id, source)
-    id = tonumber(id)
-    if not id or id < 1e5 or id > 1e13 then return end
-    local key = kind .. ":" .. id
-    if Scanner.seen[key] then return end
-    Scanner.seen[key] = true
-    local entry = {kind = kind, id = id, source = source or "?", stamp = os.date("%H:%M:%S")}
-    table.insert(Scanner.found, entry)
-    notify("SCAN", kind .. " " .. id .. " · " .. (source or "?"))
-    for _, fn in ipairs(Scanner.listeners) do pcall(fn, entry) end
-end
-genv.BoltScanAdd = scanAdd
-
-function Scanner.capture(method, args)
-    if method == "PromptGamePassPurchase" then scanAdd("Gamepass", args[2], "PromptGamePassPurchase")
-    elseif method == "PromptProductPurchase" then scanAdd("Product", args[2], "PromptProductPurchase")
-    elseif method == "UserOwnsGamePassAsync" then scanAdd("Gamepass", args[2] or args[1], "UserOwnsGamePassAsync")
-    elseif method == "PlayerOwnsAsset" then scanAdd("Asset", args[2] or args[1], "PlayerOwnsAsset")
-    elseif method == "GetProductInfo" then scanAdd("Product", args[1], "GetProductInfo")
-    elseif method == "GetGamePassProductInfo" then scanAdd("Gamepass", args[1], "GetGamePassProductInfo")
-    elseif method == "PromptPurchase" then scanAdd("Asset", args[2], "PromptPurchase")
-    end
-end
-
-local function deepScan()
-    local roots = { workspace, ReplicatedStorage, StarterGui, Players, Lighting }
-    local count = 0
-    for _, root in ipairs(roots) do
-        for _, obj in ipairs(root:GetDescendants()) do
-            if obj:IsA("NumberValue") or obj:IsA("IntValue") or obj:IsA("StringValue") then
-                local v = tonumber(obj.Value)
-                if v and v >= 1e5 and v < 1e13 then
-                    local n = obj.Name:lower()
-                    if n:find("pass") or n:find("product") or n:find("gamepass")
-                       or n:find("purchase") or n:find("assetid") or n == "id" then
-                        local kind = "ID?"
-                        if n:find("pass") then kind = "Gamepass"
-                        elseif n:find("product") then kind = "Product" end
-                        scanAdd(kind, v, obj:GetFullName())
-                        count += 1
-                    end
-                end
-            elseif obj:IsA("ProximityPrompt") then
-                local t = (obj.ActionText or "") .. " " .. (obj.ObjectText or "")
-                for id in t:gmatch("%d%d%d%d%d+") do
-                    scanAdd("Gamepass?", tonumber(id), obj:GetFullName())
-                    count += 1
-                end
-            end
-        end
-    end
-    notify("SCAN", "Deep scan complete · " .. count .. " hits")
-end
-
--- ══════════════════════════════════════════════
---   FAKERS
--- ══════════════════════════════════════════════
-local fakeState = {
-    gamepassAll=false, gamepassId=nil, productAll=false, productId=nil,
-    premium=false, verified=false, originalHooks={}, installed=false
-}
-
-local function installHooks()
-    if fakeState.installed then return true end
-    if hasHookMethod then
-        local oldIdx
-        oldIdx = hookmetamethod(game, "__index", function(self, key)
-            if self == LP then
-                if key == "MembershipType" and fakeState.premium then return Enum.MembershipType.Premium end
-                if key == "HasVerifiedBadge" and fakeState.verified then return true end
-            end
-            return oldIdx(self, key)
-        end)
-        fakeState.originalHooks.index = oldIdx
-        local oldNC
-        oldNC = hookmetamethod(game, "__namecall", function(self, ...)
-            local method = getnamecallmethod and getnamecallmethod() or ""
-            local args = {...}
-            pcall(Scanner.capture, method, args)
-            if self == LP and method == "HasVerifiedBadge" and fakeState.verified then return true end
-            if self == LP and method == "GetMembershipType" and fakeState.premium then return Enum.MembershipType.Premium end
-            if method == "UserOwnsGamePassAsync" then
-                if fakeState.gamepassAll then return true end
-                if fakeState.gamepassId and (args[1]==fakeState.gamepassId or args[2]==fakeState.gamepassId) then return true end
-            end
-            if method == "PlayerOwnsAsset" then
-                if fakeState.productAll then return true end
-                if fakeState.productId and (args[1]==fakeState.productId or args[2]==fakeState.productId) then return true end
-            end
-            if method == "GetProductInfo" then
-                if fakeState.productAll or fakeState.productId then
-                    local info = oldNC(self, ...)
-                    if type(info) == "table" then
-                        info.IsForSale = true; info.PriceInRobux = 0
-                        if fakeState.verified then info.IsOwned = true end
-                    end
-                    return info
-                end
-            end
-            return oldNC(self, ...)
-        end)
-        fakeState.originalHooks.namecall = oldNC
-    else
-        local mt = getrawmt and getrawmt(game)
-        if not mt then return false end
-        local oldNC, oldIdx = mt.__namecall, mt.__index
-        fakeState.originalHooks.namecall = oldNC
-        fakeState.originalHooks.index = oldIdx
-        pcall(function() setro(mt, false) end)
-        mt.__namecall = newc(function(self, ...)
-            local method = getnamecallmethod and getnamecallmethod() or ""
-            local args = {...}
-            pcall(Scanner.capture, method, args)
-            if self == LP and method == "HasVerifiedBadge" and fakeState.verified then return true end
-            if self == LP and method == "GetMembershipType" and fakeState.premium then return Enum.MembershipType.Premium end
-            if method == "UserOwnsGamePassAsync" then
-                if fakeState.gamepassAll then return true end
-                if fakeState.gamepassId and (args[1]==fakeState.gamepassId or args[2]==fakeState.gamepassId) then return true end
-            end
-            if method == "PlayerOwnsAsset" then
-                if fakeState.productAll then return true end
-                if fakeState.productId and (args[1]==fakeState.productId or args[2]==fakeState.productId) then return true end
-            end
-            if method == "GetProductInfo" then
-                if fakeState.productAll or fakeState.productId then
-                    local info = oldNC(self, ...)
-                    if type(info) == "table" then
-                        info.IsForSale = true; info.PriceInRobux = 0
-                        if fakeState.verified then info.IsOwned = true end
-                    end
-                    return info
-                end
-            end
-            return oldNC(self, ...)
-        end)
-        mt.__index = newc(function(self, key)
-            if self == LP then
-                if key == "MembershipType" and fakeState.premium then return Enum.MembershipType.Premium end
-                if key == "HasVerifiedBadge" and fakeState.verified then return true end
-            end
-            return oldIdx(self, key)
-        end)
-        pcall(function() setro(mt, true) end)
-    end
-    fakeState.installed = true
-    return true
-end
-
-local function restoreHooks()
-    if not fakeState.installed then return end
-    if hasHookMethod then
-        if fakeState.originalHooks.index then pcall(hookmetamethod, game, "__index", fakeState.originalHooks.index) end
-        if fakeState.originalHooks.namecall then pcall(hookmetamethod, game, "__namecall", fakeState.originalHooks.namecall) end
-    else
-        local mt = getrawmt and getrawmt(game)
-        if mt then
-            pcall(function() setro(mt, false) end)
-            if fakeState.originalHooks.namecall then mt.__namecall = fakeState.originalHooks.namecall end
-            if fakeState.originalHooks.index then mt.__index = fakeState.originalHooks.index end
-            pcall(function() setro(mt, true) end)
-        end
-    end
-    fakeState.installed = false
-    fakeState.gamepassAll=false; fakeState.gamepassId=nil
-    fakeState.productAll=false; fakeState.productId=nil
-    fakeState.premium=false; fakeState.verified=false
-    notify("BOLT", "All faker hooks restored")
-end
-
-local function FakeGamepass(id)
-    if not installHooks() then return end
-    if not id or id == "" then
-        fakeState.gamepassAll = true; fakeState.gamepassId = nil
-        notify("BOLT", "Faking ALL gamepasses")
-    else
-        local num = tonumber(id)
-        if not num then notify("BOLT", "Invalid ID") return end
-        fakeState.gamepassId = num; fakeState.gamepassAll = false
-        notify("BOLT", "Faking gamepass " .. num)
-    end
-end
-local function FakeProduct(id)
-    if not installHooks() then return end
-    if not id or id == "" then
-        fakeState.productAll = true; fakeState.productId = nil
-        notify("BOLT", "Faking ALL products")
-    else
-        local num = tonumber(id)
-        if not num then notify("BOLT", "Invalid ID") return end
-        fakeState.productId = num; fakeState.productAll = false
-        notify("BOLT", "Faking product " .. num)
-    end
-end
-local function FakePremium(on)
-    if not installHooks() then return end
-    fakeState.premium = on and true or false
-    notify("BOLT", on and "Premium faked" or "Premium restored")
-end
-local function FakeVerified(on)
-    if not installHooks() then return end
-    fakeState.verified = on and true or false
-    notify("BOLT", on and "Verified faked" or "Verified restored")
-end
-
--- ══════════════════════════════════════════════
 --   UI
 -- ══════════════════════════════════════════════
 local SG = C("ScreenGui", {
-    Name = "⚡BOLT HUB",
-    ResetOnSpawn = false,
+    Name = "⚡BOLT HUB", ResetOnSpawn = false,
     IgnoreGuiInset = true,
     ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
     Parent = gethui()
@@ -918,7 +1030,7 @@ local LogoTile = C("Frame", {
     BackgroundColor3 = GOLD, BorderSizePixel = 0, Parent = Top
 })
 Cor(LogoTile, 5)
-drawBolt(LogoTile, 16)
+drawBolt(LogoTile, 20)
 
 C("TextLabel", {
     Size = UDim2.new(0, 200, 1, 0), Position = UDim2.new(0, 42, 0, 0),
@@ -963,8 +1075,7 @@ local function WinBtn(glyph, x, cb, danger, hoverColor)
 end
 
 local IconGui = C("ScreenGui", {
-    Name = "BoltIcon", ResetOnSpawn = false,
-    IgnoreGuiInset = true,
+    Name = "BoltIcon", ResetOnSpawn = false, IgnoreGuiInset = true,
     ZIndexBehavior = Enum.ZIndexBehavior.Sibling, Parent = gethui()
 })
 genv.BoltIcon = IconGui
@@ -1007,7 +1118,6 @@ Icon.MouseLeave:Connect(function() Tw(Icon, .12, {BackgroundColor3 = GOLD}) end)
 local function MinimizeToIcon() M.Visible = false; Icon.Visible = true end
 local function RestoreFromIcon() M.Visible = true; Icon.Visible = false end
 
--- TRUE fullscreen maximize
 local maximized = false
 local preMaxSize, preMaxPos = nil, nil
 WinBtn("—", -102, function() MinimizeToIcon() end)
@@ -1205,7 +1315,7 @@ local function renderScanner()
     for _, c in ipairs(ScannerScroll:GetChildren()) do
         if c:IsA("Frame") then c:Destroy() end
     end
-    if #Scanner.found == 0 then
+    if #FakeData.gamepasses == 0 and #FakeData.products == 0 then
         local empty = C("Frame", { Size = UDim2.new(1, 0, 0, 40), BackgroundTransparency = 1, Parent = ScannerScroll })
         C("TextLabel", {
             Size = UDim2.new(1, 0, 1, 0), BackgroundTransparency = 1,
@@ -1215,52 +1325,110 @@ local function renderScanner()
         })
         return
     end
-    for i = #Scanner.found, 1, -1 do
-        local e = Scanner.found[i]
-        local row = C("Frame", {
-            Size = UDim2.new(1, 0, 0, 42), BackgroundColor3 = CARD_H,
-            BorderSizePixel = 0, Parent = ScannerScroll
-        })
-        Cor(row, 4)
+
+    if #FakeData.gamepasses > 0 then
+        local header = C("Frame", { Size = UDim2.new(1, 0, 0, 20), BackgroundTransparency = 1, Parent = ScannerScroll })
         C("TextLabel", {
-            Size = UDim2.new(1, -12, 0, 12), Position = UDim2.new(0, 8, 0, 6),
-            BackgroundTransparency = 1, Text = e.kind .. "  ·  " .. e.id,
-            TextColor3 = TX, TextSize = 11, Font = Enum.Font.GothamMedium,
-            TextXAlignment = Enum.TextXAlignment.Left, Parent = row
+            Size = UDim2.new(1, 0, 1, 0), BackgroundTransparency = 1,
+            Text = "GAMEPASSES", TextColor3 = GOLD, TextSize = 10,
+            Font = Enum.Font.GothamBold, TextXAlignment = Enum.TextXAlignment.Left, Parent = header
         })
+        for i = #FakeData.gamepasses, 1, -1 do
+            local e = FakeData.gamepasses[i]
+            local row = C("Frame", {
+                Size = UDim2.new(1, 0, 0, 42), BackgroundColor3 = CARD_H,
+                BorderSizePixel = 0, Parent = ScannerScroll
+            })
+            Cor(row, 4)
+            C("TextLabel", {
+                Size = UDim2.new(1, -12, 0, 12), Position = UDim2.new(0, 8, 0, 6),
+                BackgroundTransparency = 1, Text = e.name,
+                TextColor3 = TX, TextSize = 11, Font = Enum.Font.GothamMedium,
+                TextXAlignment = Enum.TextXAlignment.Left, Parent = row
+            })
+            C("TextLabel", {
+                Size = UDim2.new(1, -12, 0, 10), Position = UDim2.new(0, 8, 0, 20),
+                BackgroundTransparency = 1, Text = "ID: " .. e.id .. (e.price and (" · " .. e.price .. " R$") or ""),
+                TextColor3 = TX_MUT, TextSize = 9, Font = Enum.Font.Gotham,
+                TextXAlignment = Enum.TextXAlignment.Left,
+                TextTruncate = Enum.TextTruncate.AtEnd, Parent = row
+            })
+            local cp = C("TextButton", {
+                Size = UDim2.new(0, 40, 0, 16), Position = UDim2.new(1, -92, 0, 13),
+                BackgroundColor3 = Color3.fromRGB(32, 32, 36),
+                Text = "copy", TextColor3 = TX_DIM, TextSize = 9,
+                Font = Enum.Font.GothamMedium, BorderSizePixel = 0,
+                AutoButtonColor = false, Parent = row
+            })
+            Cor(cp, 3)
+            cp.MouseButton1Click:Connect(function()
+                setclipboard(tostring(e.id)); notify("BOLT", "Copied " .. e.id)
+            end)
+            local fk = C("TextButton", {
+                Size = UDim2.new(0, 44, 0, 16), Position = UDim2.new(1, -48, 0, 13),
+                BackgroundColor3 = GOLD, Text = "fake", TextColor3 = BLACK, TextSize = 9,
+                Font = Enum.Font.GothamBold, BorderSizePixel = 0,
+                AutoButtonColor = false, Parent = row
+            })
+            Cor(fk, 3)
+            fk.MouseButton1Click:Connect(function()
+                fakePurchase(e.id, nil)
+            end)
+        end
+    end
+
+    if #FakeData.products > 0 then
+        local header = C("Frame", { Size = UDim2.new(1, 0, 0, 20), BackgroundTransparency = 1, Parent = ScannerScroll })
         C("TextLabel", {
-            Size = UDim2.new(1, -12, 0, 10), Position = UDim2.new(0, 8, 0, 20),
-            BackgroundTransparency = 1, Text = e.source,
-            TextColor3 = TX_MUT, TextSize = 9, Font = Enum.Font.Gotham,
-            TextXAlignment = Enum.TextXAlignment.Left,
-            TextTruncate = Enum.TextTruncate.AtEnd, Parent = row
+            Size = UDim2.new(1, 0, 1, 0), BackgroundTransparency = 1,
+            Text = "PRODUCTS", TextColor3 = GOLD, TextSize = 10,
+            Font = Enum.Font.GothamBold, TextXAlignment = Enum.TextXAlignment.Left, Parent = header
         })
-        local cp = C("TextButton", {
-            Size = UDim2.new(0, 40, 0, 16), Position = UDim2.new(1, -92, 0, 13),
-            BackgroundColor3 = Color3.fromRGB(32, 32, 36),
-            Text = "copy", TextColor3 = TX_DIM, TextSize = 9,
-            Font = Enum.Font.GothamMedium, BorderSizePixel = 0,
-            AutoButtonColor = false, Parent = row
-        })
-        Cor(cp, 3)
-        cp.MouseButton1Click:Connect(function()
-            setclipboard(tostring(e.id)); notify("BOLT", "Copied " .. e.id)
-        end)
-        local fk = C("TextButton", {
-            Size = UDim2.new(0, 44, 0, 16), Position = UDim2.new(1, -48, 0, 13),
-            BackgroundColor3 = GOLD, Text = "fake", TextColor3 = BLACK, TextSize = 9,
-            Font = Enum.Font.GothamBold, BorderSizePixel = 0,
-            AutoButtonColor = false, Parent = row
-        })
-        Cor(fk, 3)
-        fk.MouseButton1Click:Connect(function()
-            if e.kind:find("Gamepass") then FakeGamepass(tostring(e.id))
-            elseif e.kind:find("Product") then FakeProduct(tostring(e.id))
-            else FakeGamepass(tostring(e.id)) end
-        end)
+        for i = #FakeData.products, 1, -1 do
+            local e = FakeData.products[i]
+            local row = C("Frame", {
+                Size = UDim2.new(1, 0, 0, 42), BackgroundColor3 = CARD_H,
+                BorderSizePixel = 0, Parent = ScannerScroll
+            })
+            Cor(row, 4)
+            C("TextLabel", {
+                Size = UDim2.new(1, -12, 0, 12), Position = UDim2.new(0, 8, 0, 6),
+                BackgroundTransparency = 1, Text = e.name,
+                TextColor3 = TX, TextSize = 11, Font = Enum.Font.GothamMedium,
+                TextXAlignment = Enum.TextXAlignment.Left, Parent = row
+            })
+            C("TextLabel", {
+                Size = UDim2.new(1, -12, 0, 10), Position = UDim2.new(0, 8, 0, 20),
+                BackgroundTransparency = 1, Text = "ID: " .. e.id .. (e.price and (" · " .. e.price .. " R$") or ""),
+                TextColor3 = TX_MUT, TextSize = 9, Font = Enum.Font.Gotham,
+                TextXAlignment = Enum.TextXAlignment.Left,
+                TextTruncate = Enum.TextTruncate.AtEnd, Parent = row
+            })
+            local cp = C("TextButton", {
+                Size = UDim2.new(0, 40, 0, 16), Position = UDim2.new(1, -92, 0, 13),
+                BackgroundColor3 = Color3.fromRGB(32, 32, 36),
+                Text = "copy", TextColor3 = TX_DIM, TextSize = 9,
+                Font = Enum.Font.GothamMedium, BorderSizePixel = 0,
+                AutoButtonColor = false, Parent = row
+            })
+            Cor(cp, 3)
+            cp.MouseButton1Click:Connect(function()
+                setclipboard(tostring(e.id)); notify("BOLT", "Copied " .. e.id)
+            end)
+            local fk = C("TextButton", {
+                Size = UDim2.new(0, 44, 0, 16), Position = UDim2.new(1, -48, 0, 13),
+                BackgroundColor3 = GOLD, Text = "fake", TextColor3 = BLACK, TextSize = 9,
+                Font = Enum.Font.GothamBold, BorderSizePixel = 0,
+                AutoButtonColor = false, Parent = row
+            })
+            Cor(fk, 3)
+            fk.MouseButton1Click:Connect(function()
+                fakePurchase(nil, e.id)
+            end)
+        end
     end
 end
-table.insert(Scanner.listeners, function() renderScanner() end)
+table.insert(FakeData.listeners, function() renderScanner() end)
 
 local Stat = C("Frame", {
     Size = UDim2.new(1, 0, 0, 22), Position = UDim2.new(0, 0, 1, -22),
@@ -1297,7 +1465,7 @@ end
 FootBtn("copy discord  ·", -124, function()
     setclipboard("https://discord.gg/Ehte2SFpfu"); notify("BOLT", "Discord copied")
 end)
-FootBtn("v3.1.0  ", -14, function() end)
+FootBtn("v5.0.0  ", -14, function() end)
 
 -- ══════════════════════════════════════════════
 --   COMPONENTS
@@ -1612,7 +1780,7 @@ Btn(tGUIs, "FE Headless", "Enable/disable headless", function()
     loadstring(game:HttpGet("https://gist.githubusercontent.com/TreeByte403/ae2620103048e56de7d0004e2df385d2/raw/ee3ac096491e5bc4bf99429ba80388b1cb75161e/FeHeadless.lua"))()
 end)
 
--- ═══ MAIN (expanded) ═══
+-- ═══ MAIN ═══
 Sec(tMain, "Character")
 Tog(tMain, "Invisible (Clone)", "R6 / R15", function(on) Invisible(on) end)
 Tog(tMain, "Fly", "WASD + Space / Shift", function(on) Fly(on) end)
@@ -1722,7 +1890,7 @@ Btn(tMain, "Reset Char", "Kill yourself", function()
     local h = GetHum(); if h then h.Health = 0 end
 end)
 
--- ═══ PLAYER (expanded) ═══
+-- ═══ PLAYER ═══
 Sec(tPlayer, "Comfort")
 Tog(tPlayer, "Anti-AFK", "Prevent idle kick", function(on) antiAfk(on) end)
 Tog(tPlayer, "Anti Lag / Low GFX", "Strip particles + decals + lights", function(on) lowGfx(on) end)
@@ -1754,19 +1922,15 @@ end)
 
 Sec(tPlayer, "Interaction")
 Tog(tPlayer, "Auto Clicker", "Left-click spam", function(on)
-    if on then autoClicker(true, genv.BoltCps or 10) else stopAutoClicker() end
+    if on then autoClicker(true, genv.BoltCps or 10) else autoClicker(false) end
 end)
 Inp(tPlayer, "Set CPS", "Clicks per second", "10", function(v)
     local n = tonumber(v); if n then genv.BoltCps = n notify("BOLT", "CPS = " .. n) end
 end)
 
 Sec(tPlayer, "Targets")
-Inp(tPlayer, "Follow Player", "Type name (partial ok)", "username...", function(v)
-    followPlayer(v)
-end)
-Inp(tPlayer, "Spectate Player", "Type name (partial ok)", "username...", function(v)
-    spectate(v)
-end)
+Inp(tPlayer, "Follow Player", "Type name (partial ok)", "username...", function(v) followPlayer(v) end)
+Inp(tPlayer, "Spectate Player", "Type name (partial ok)", "username...", function(v) spectate(v) end)
 Btn(tPlayer, "Stop Following", "Detach follow loop", function()
     if genv.BoltFollow then genv.BoltFollow:Disconnect() genv.BoltFollow = nil end
     notify("BOLT", "Follow stopped")
@@ -1778,7 +1942,7 @@ Btn(tPlayer, "Scale ×1.5", "Bigger character", function() setScale(1.5) end)
 Btn(tPlayer, "Scale ×0.5", "Smaller character", function() setScale(0.5) end)
 Btn(tPlayer, "Reset Scale", "Back to normal", resetScale)
 
--- ═══ VR (expanded) ═══
+-- ═══ VR ═══
 Sec(tVR, "Movement")
 Tog(tVR, "VR Fly", "Fly with WASD", function(on) Fly(on) end)
 Tog(tVR, "VR Noclip", "No collision", function(on) Noclip(on) end)
@@ -1799,48 +1963,50 @@ Btn(tVR, "Hand Scale 0.5", "Smaller hands", function()
     pcall(function() LP.VRScale = 0.5 end)
     notify("BOLT", "VR hand scale 0.5")
 end)
-Inp(tVR, "Camera Offset", "Y-axis offset (studs)", "0", function(v)
-    local n = tonumber(v); if not n then return end
-    local cam = LP.Character and LP.Character:FindFirstChild("Head")
-    if cam then cam.CFrame = cam.CFrame * CFrame.new(0, n, 0) end
+
+-- ═══ FAKERS — GOD TIER ═══
+Sec(tFakers, "Global Mode")
+Tog(tFakers, "Global Fake (Everything Owned)", "Every gamepass/product query returns true", function(on)
+    FakeData.globalOn = on
+    installMarketplaceHooks()
+    notify("FAKE", on and "GLOBAL MODE ON — everything reads as owned" or "Global mode off")
+end)
+Tog(tFakers, "Auto-Fake on Detect", "Immediately blast when a prompt is captured", function(on)
+    FakeData.autoFake = on
+    notify("FAKE", on and "Auto-Fake enabled" or "Auto-Fake disabled")
 end)
 
--- ═══ FAKERS ═══
-Sec(tFakers, "Gamepasses")
-Btn(tFakers, "Fake All Gamepasses", "Spoof ownership of every gamepass", function() FakeGamepass(nil) end)
-Inp(tFakers, "Fake Specific Gamepass", "Enter a gamepass ID", "gamepass id...", function(id) FakeGamepass(id) end)
-
-Sec(tFakers, "Products")
-Btn(tFakers, "Fake All Products", "Spoof ownership of every product", function() FakeProduct(nil) end)
-Inp(tFakers, "Fake Specific Product", "Enter a product ID", "product id...", function(id) FakeProduct(id) end)
-
-Sec(tFakers, "Account Status")
-Tog(tFakers, "Fake Premium", "Report as Premium member", function(on) FakePremium(on) end)
-Tog(tFakers, "Fake Verified Badge", "Report as verified", function(on) FakeVerified(on) end)
-
-Sec(tFakers, "ID Scanner")
-Btn(tFakers, "Deep Scan Now", "Sweep workspace + game for IDs", deepScan)
-Btn(tFakers, "Fake Latest Gamepass", "Fake newest detected gamepass", function()
-    for i = #Scanner.found, 1, -1 do
-        local f = Scanner.found[i]
-        if f.kind:find("Gamepass") then FakeGamepass(tostring(f.id)) return end
-    end
-    notify("BOLT", "Nothing detected yet")
-end)
-Btn(tFakers, "Fake Latest Product", "Fake newest detected product", function()
-    for i = #Scanner.found, 1, -1 do
-        local f = Scanner.found[i]
-        if f.kind:find("Product") then FakeProduct(tostring(f.id)) return end
-    end
-    notify("BOLT", "No product detected yet")
-end)
-Btn(tFakers, "Clear Scan Results", "Wipe the detected ID list", function()
-    Scanner.found = {}; Scanner.seen = {}
+Sec(tFakers, "Scanner")
+Btn(tFakers, "Deep Scan Game", "Find all gamepasses + products", deepScanFakes)
+Btn(tFakers, "Refresh Scanner", "Re-render the scanner panel", renderScanner)
+Btn(tFakers, "Fake ALL Detected", "Blast every captured ID at once", fakeAllDetected)
+Btn(tFakers, "Clear Scan Results", "Wipe detected IDs", function()
+    FakeData.gamepasses = {}; FakeData.products = {}; FakeData.seen = {}
     renderScanner(); notify("SCAN", "Results cleared")
 end)
 
-Sec(tFakers, "Cleanup")
-Btn(tFakers, "Restore All Hooks", "Remove every faker hook", restoreHooks)
+Sec(tFakers, "Manual Fake")
+Inp(tFakers, "Fake Gamepass by ID", "Enter gamepass ID", "gamepass id...", function(id)
+    fakePurchase(id, nil)
+end)
+Inp(tFakers, "Fake Product by ID", "Enter product ID", "product id...", function(id)
+    fakePurchase(nil, id)
+end)
+
+Sec(tFakers, "Engine Info")
+Btn(tFakers, "Check Executor Support", "replicatesignal / firesignal / hookmetamethod", function()
+    notify("SUPPORT", "replicatesignal → " .. tostring(hasReplicateSignal))
+    notify("SUPPORT", "firesignal       → " .. tostring(hasFireSignal))
+    notify("SUPPORT", "hookmetamethod   → " .. tostring(hasHookMethod))
+    notify("SUPPORT", "cloneref         → " .. tostring(hasCloneRef))
+end)
+Btn(tFakers, "Reinstall Hooks", "Force reinstall MP + detection hooks", function()
+    FakeData.hookedMP = false
+    genv.BoltDetectHooks = false
+    installMarketplaceHooks()
+    installDetectionHooks()
+    notify("FAKE", "Hooks reinstalled")
+end)
 
 -- ═══ NETWORK ═══
 Sec(tNetwork, "Ownership")
@@ -2008,7 +2174,8 @@ end)
 -- ══════════════════════════════════════════════
 SelTab(tMain)
 renderScanner()
-installHooks()
+installDetectionHooks()
+installMarketplaceHooks()
 
 UIS.InputBegan:Connect(function(input, gp)
     if gp then return end
@@ -2017,4 +2184,10 @@ UIS.InputBegan:Connect(function(input, gp)
     end
 end)
 
-notify("BOLT", "Bolt Hub v3.1.0 loaded · welcome, " .. LP.Name)
+task.defer(function()
+    task.wait(1)
+    notify("BOLT", "replicatesignal: " .. tostring(hasReplicateSignal))
+    notify("BOLT", "firesignal: " .. tostring(hasFireSignal))
+end)
+
+notify("BOLT", "Bolt Hub loaded · welcome, " .. LP.Name)
