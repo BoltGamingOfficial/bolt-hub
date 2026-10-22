@@ -1,5 +1,5 @@
 --[[
-    ⚡ BOLT HUB - THE ULTIMATE ROBLOX HUB ⚡
+    ⚡ BOLT HUB — THE ULTIMATE ROBLOX HUB⚡
 ]]
 
 -- ─── Services ───
@@ -16,9 +16,14 @@ local VirtualUser        = game:GetService("VirtualUser")
 local VirtualInput       = game:GetService("VirtualInputManager")
 local MarketplaceService = game:GetService("MarketplaceService")
 
-local LP     = Players.LocalPlayer
+-- ─── Safe LP + Camera (fixes nil race at load) ───
+local LP = Players.LocalPlayer or Players:WaitForChild("Player", 5)
+if not LP then
+    repeat task.wait(0.1) until Players.LocalPlayer
+    LP = Players.LocalPlayer
+end
 local Mouse  = LP:GetMouse()
-local Camera = workspace.CurrentCamera
+local Camera = workspace.CurrentCamera or workspace:WaitForChild("Camera", 5)
 
 -- ─── Globals / Fallbacks ───
 local genv          = getgenv and getgenv() or _G
@@ -31,32 +36,32 @@ local unpack        = table.unpack or unpack
 local identify      = identifyexecutor or function() return "Unknown" end
 
 -- ══════════════════════════════════════════════
---   FULL RE-EXEC WIPE (fixes stacking)
+--   FULL RE-EXEC WIPE (with pcall safety)
 -- ══════════════════════════════════════════════
 local function wipeOld()
-    -- Kill threads first
-    if genv.BoltNetTimer then pcall(task.cancel, genv.BoltNetTimer) genv.BoltNetTimer = nil end
-    -- Kill connections
+    if genv.BoltNetTimer then pcall(function() task.cancel(genv.BoltNetTimer) end) genv.BoltNetTimer = nil end
     for _, k in ipairs({
         "BoltNetAdd", "BoltDeltaClamp", "BoltFly", "BoltNoclip", "BoltSpin",
         "BoltSpinAll", "BoltFullbright", "BoltLagback", "BoltAntiAfk", "BoltGod",
         "BoltRegen", "BoltFollow", "BoltInfJump", "BoltClick", "BoltExploitChat",
+        "BoltCharAdded", "BoltGfxStore",
     }) do
         local v = genv[k]
-        if v then pcall(function() v:Disconnect() end) genv[k] = nil end
+        if v and type(v) == "userdata" then
+            pcall(function() v:Disconnect() end)
+        end
+        genv[k] = nil
     end
-    -- Kill instances
     if genv.BoltHub then pcall(function() genv.BoltHub:Destroy() end) genv.BoltHub = nil end
     if genv.BoltIcon then pcall(function() genv.BoltIcon:Destroy() end) genv.BoltIcon = nil end
     if genv.BoltFlyBV then pcall(function() genv.BoltFlyBV:Destroy() end) genv.BoltFlyBV = nil end
     if genv.BoltClone then pcall(function() genv.BoltClone:Destroy() end) genv.BoltClone = nil end
-    -- Reset runtime flags (but NOT hook-installed flags)
     genv.BoltFlingAll = false
     genv.BoltAutoClick = false
     genv.BoltGlobalFake = false
     genv.BoltAutoNet = false
 end
-wipeOld()
+pcall(wipeOld)
 
 -- ─── Capability Scanner ───
 local CAP = {}
@@ -104,21 +109,16 @@ local function registerFeature(name, deps, fn)
 end
 
 local function reportPruned()
-    if #PRUNED == 0 then print("[BOLT] All features supported."); return end
-    local lines = { "[BOLT] PRUNED FEATURES (" .. #PRUNED .. "):" }
+    if #PRUNED == 0 then return end
+    local lines = { "[BOLT] PRUNED (" .. #PRUNED .. "):" }
     for _, p in ipairs(PRUNED) do
         table.insert(lines, "  · " .. p.name .. " — missing: " .. tostring(p.missing))
     end
-    print(table.concat(lines, "\n"))
+    pcall(function() print(table.concat(lines, "\n")) end)
 end
 
--- ══════════════════════════════════════════════
---   KEY BYPASS + HUB LOADER
--- ══════════════════════════════════════════════
-local KeyBypass = {
-    enabled = true,
-    dummyKey = "bolt-free-key-bypass-111111111111111111111",
-}
+-- ─── Key Bypass + Loader ───
+local KeyBypass = { enabled = true, dummyKey = "bolt-free-key-bypass-111111111111111111111" }
 
 local function setupKeyEnvironment()
     if not KeyBypass.enabled then return end
@@ -230,7 +230,7 @@ local function stopForceStats()
 end
 
 -- ══════════════════════════════════════════════
---   AUTO NETWORK OWNERSHIP (REWRITTEN — LIGHT)
+--   AUTO NETWORK OWNERSHIP (optimized)
 -- ══════════════════════════════════════════════
 local AutoNet = { enabled = true, claimedCount = 0 }
 local AUTO_RADIUS = 200
@@ -244,19 +244,20 @@ local function installAutoNetwork()
     if genv.BoltAutoNet then return end
     genv.BoltAutoNet = true
 
-    -- ONE-TIME initial sweep, radius-limited
-    task.spawn(function()
+    -- Fast initial sweep using native spatial query
+    task.defer(function()
         local pos = getHRPPos()
         if not pos then return end
-        for _, obj in ipairs(workspace:GetDescendants()) do
-            if obj:IsA("BasePart") and not obj.Anchored
-               and (obj.Position - pos).Magnitude < AUTO_RADIUS then
-                pcall(function() obj:SetNetworkOwner(LP) end)
+        local parts = workspace:GetPartBoundsInRadius(pos, AUTO_RADIUS)
+        for _, part in ipairs(parts) do
+            if not part.Anchored then
+                pcall(function() part:SetNetworkOwner(LP) end)
+                AutoNet.claimedCount = AutoNet.claimedCount + 1
             end
         end
     end)
 
-    -- Claim newly spawned parts, but only within radius
+    -- Claim newly spawned parts in radius
     genv.BoltNetAdd = workspace.DescendantAdded:Connect(function(obj)
         if not obj:IsA("BasePart") or obj.Anchored then return end
         local pos = getHRPPos()
@@ -266,23 +267,23 @@ local function installAutoNetwork()
         end
     end)
 
-    -- Own character on respawn
-    LP.CharacterAdded:Connect(function(char)
+    -- Own character on respawn (nil-safe)
+    genv.BoltCharAdded = LP.CharacterAdded:Connect(function(char)
         task.wait(0.5)
+        if not char or not char.Parent then return end
         for _, d in ipairs(char:GetDescendants()) do
             if d:IsA("BasePart") and not d.Anchored then
                 pcall(function() d:SetNetworkOwner(LP) end)
             end
         end
     end)
-    -- NO 10s sweep timer — that was the killer
 end
 
 local function disableAutoNetwork()
     AutoNet.enabled = false
     if genv.BoltNetAdd then pcall(function() genv.BoltNetAdd:Disconnect() end) genv.BoltNetAdd = nil end
+    if genv.BoltCharAdded then pcall(function() genv.BoltCharAdded:Disconnect() end) genv.BoltCharAdded = nil end
     genv.BoltAutoNet = false
-    -- Release everything
     for _, obj in ipairs(workspace:GetDescendants()) do
         if obj:IsA("BasePart") and not obj.Anchored then
             pcall(function() obj:SetNetworkOwner(nil) end)
@@ -352,7 +353,7 @@ local function addFakeEntry(tbl, id, name, source, isGamepass)
         price = price, source = source or "?", isGamepass = isGamepass }
     table.insert(tbl, entry)
     for _, fn in ipairs(FakeData.listeners) do pcall(fn, entry) end
-    if FakeData.autoFake then
+    if FakeData.autoFake and _G.BoltFakePurchase then
         task.spawn(function()
             if isGamepass then _G.BoltFakePurchase(id, nil) else _G.BoltFakePurchase(nil, id) end
         end)
@@ -414,7 +415,7 @@ local function installMarketplaceHooks()
 end
 
 -- ══════════════════════════════════════════════
---   UNIVERSAL AC SHIELD (LEAN — no __index/__newindex)
+--   UNIVERSAL AC SHIELD (lean)
 -- ══════════════════════════════════════════════
 local function installUniversalShield()
     if genv.BoltShield then return end
@@ -845,10 +846,8 @@ local Top = C("Frame", {
     Name = "Top", Size = UDim2.new(1, 0, 0, TOP_H),
     BackgroundColor3 = PANEL, BorderSizePixel = 0, Parent = M
 })
-C("Frame", {
-    Size = UDim2.new(1, 0, 0, 1), Position = UDim2.new(0, 0, 1, -1),
-    BackgroundColor3 = EDGE, BorderSizePixel = 0, Parent = Top
-})
+C("Frame", { Size = UDim2.new(1, 0, 0, 1), Position = UDim2.new(0, 0, 1, -1),
+    BackgroundColor3 = EDGE, BorderSizePixel = 0, Parent = Top })
 
 local LogoTile = C("Frame", {
     Size = UDim2.new(0, 20, 0, 20), Position = UDim2.new(0, 14, 0.5, -10),
@@ -858,7 +857,7 @@ Cor(LogoTile, 5); drawBolt(LogoTile, 20)
 
 C("TextLabel", {
     Size = UDim2.new(0, 200, 1, 0), Position = UDim2.new(0, 42, 0, 0),
-    BackgroundTransparency = 1, Text = "Bolt Hub v7.5",
+    BackgroundTransparency = 1, Text = "Bolt Hub v7.6",
     TextColor3 = TX, TextSize = 13, Font = Enum.Font.GothamMedium,
     TextXAlignment = Enum.TextXAlignment.Left, Parent = Top
 })
@@ -953,9 +952,13 @@ local function Cleanup()
             "BoltFly", "BoltNoclip", "BoltSpin", "BoltSpinAll", "BoltFullbright",
             "BoltLagback", "BoltAntiAfk", "BoltGod", "BoltRegen", "BoltFollow",
             "BoltInfJump", "BoltDeltaClamp", "BoltClick", "BoltExploitChat",
+            "BoltCharAdded", "BoltNetAdd",
         }) do
             local v = genv[k]
-            if v then pcall(function() v:Disconnect() end) genv[k] = nil end
+            if v and type(v) == "userdata" then
+                pcall(function() v:Disconnect() end)
+            end
+            genv[k] = nil
         end
         if genv.BoltFlyBV then pcall(function() genv.BoltFlyBV:Destroy() end) genv.BoltFlyBV = nil end
         if genv.BoltClone then pcall(function() genv.BoltClone:Destroy() end) genv.BoltClone = nil end
@@ -1167,7 +1170,6 @@ local function renderScanner()
     end
 end
 
--- Debounced scanner render — max ~6/sec
 local scanRenderScheduled = false
 local function requestScannerRender()
     if scanRenderScheduled then return end
@@ -1653,11 +1655,14 @@ Btn(tGames, "Bear Hub", "Auto farm / sea events", function()
 end)
 
 Sec(tGames, "Murder Mystery 2 (MM2)")
-Btn(tGames, "Axonic MM2", "Role ESP", function()
-    loadHub("https://raw.githubusercontent.com/Kenniel123/Axonic-MM2/refs/heads/main/Axonic%20MM2")
+Btn(tGames, "AvoEz Hub", "Verified keyless MM2", function()
+    loadHub("https://raw.githubusercontent.com/y7ktn49dwr-spec/mm22/refs/heads/main/AvoEzHub")
 end)
-Btn(tGames, "Forge Hub", "Kill All, ESP", function()
-    loadHub("https://raw.githubusercontent.com/ScriptBLOXmm2/ForgeHubWaguri/refs/heads/main/keyless")
+Btn(tGames, "Role Chams", "Murderer and Sheriff ESP", function()
+    loadHub("https://raw.githubusercontent.com/imshrak/rolechams/refs/heads/main/main")
+end)
+Btn(tGames, "RBLXHub MM2", "Kill Aura, Auto Shoot", function()
+    loadHub("https://raw.githubusercontent.com/bugxiefun/roblox-scripts/refs/heads/main/rblxhub_mm2")
 end)
 Btn(tGames, "FoxName MM2", "Classic MM2", function()
     loadHub("https://raw.githubusercontent.com/xv3gasx/Murder-Mystery-2/refs/heads/main/Release.lua")
@@ -1939,27 +1944,24 @@ Btn(tSettings, "Stop All Loops", "Kill Fly, Noclip, Spin, etc.", function() Clea
 Btn(tSettings, "Unload Hub", "Close UI completely", function() Cleanup() end)
 
 -- ══════════════════════════════════════════════
---   INIT
+--   INIT (safe pcall wrapper)
 -- ══════════════════════════════════════════════
-SelTab(tMain)
-renderScanner()
+pcall(function()
+    SelTab(tMain)
+    renderScanner()
 
-registerFeature("Detection Hooks", { "getrawmetatable" }, installDetectionHooks)
--- Note: Marketplace Hooks not installed at init — only on Global Fake toggle
+    registerFeature("Detection Hooks", { "getrawmetatable" }, installDetectionHooks)
+    registerFeature("Universal Shield", { "getrawmetatable", "newcclosure" }, installUniversalShield)
+    registerFeature("Delta Clamp", {}, function() installDeltaClamp(45) end)
+    registerFeature("Remote Guard", { "getrawmetatable" }, installRemoteGuard)
+    registerFeature("Auto Network", {}, installAutoNetwork)
 
-task.defer(function()
-    pcall(installUniversalShield)
-    pcall(installDeltaClamp, 45)
-    pcall(installRemoteGuard)
+    UIS.InputBegan:Connect(function(input, gp)
+        if gp then return end
+        if input.KeyCode == Enum.KeyCode.RightShift then
+            if M.Visible then MinimizeToIcon() else RestoreFromIcon() end
+        end
+    end)
+
+    reportPruned()
 end)
-
-installAutoNetwork()
-
-UIS.InputBegan:Connect(function(input, gp)
-    if gp then return end
-    if input.KeyCode == Enum.KeyCode.RightShift then
-        if M.Visible then MinimizeToIcon() else RestoreFromIcon() end
-    end
-end)
-
-reportPruned()
