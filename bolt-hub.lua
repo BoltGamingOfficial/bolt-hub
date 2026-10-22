@@ -1,5 +1,5 @@
 --[[
-    ⚡ BOLT HUB — THE ULTIMATE ROBLOX HUB ⚡
+    ⚡ BOLT HUB ⚡
 ]]
 
 -- ─── Services ───
@@ -55,7 +55,6 @@ local function wipeOld()
     if genv.BoltIcon then pcall(function() genv.BoltIcon:Destroy() end) genv.BoltIcon = nil end
     if genv.BoltFlyBV then pcall(function() genv.BoltFlyBV:Destroy() end) genv.BoltFlyBV = nil end
     if genv.BoltClone then pcall(function() genv.BoltClone:Destroy() end) genv.BoltClone = nil end
-    genv.BoltFlingAll = false
     genv.BoltAutoClick = false
     genv.BoltGlobalFake = false
 end
@@ -200,51 +199,6 @@ local function AllPlayers()
     for _, p in ipairs(Players:GetPlayers()) do if p ~= LP then table.insert(t, p) end end
     return t
 end
-local function SafeNO(part)
-    if not part or not part:IsA("BasePart") then return end
-    pcall(function() if not part.Anchored then part:SetNetworkOwner(LP) end end)
-end
-
--- ══════════════════════════════════════════════
---   NETWORK OWNERSHIP (manual only)
--- ══════════════════════════════════════════════
-local function claimAllParts()
-    local n = 0
-    for _, obj in ipairs(workspace:GetDescendants()) do
-        if obj:IsA("BasePart") and not obj.Anchored then
-            local ok = pcall(function() obj:SetNetworkOwner(LP) end)
-            if ok then n = n + 1 end
-        end
-    end
-    notify("NET", "Claimed " .. n .. " parts")
-    return n
-end
-
-local function claimNearbyParts(radius)
-    local hrp = GetHRP(); if not hrp then notify("NET", "No character"); return 0 end
-    local parts = workspace:GetPartBoundsInRadius(hrp.Position, radius or 200)
-    local n = 0
-    for _, part in ipairs(parts) do
-        if not part.Anchored then
-            local ok = pcall(function() part:SetNetworkOwner(LP) end)
-            if ok then n = n + 1 end
-        end
-    end
-    notify("NET", "Claimed " .. n .. " nearby parts")
-    return n
-end
-
-local function releaseAllParts()
-    local n = 0
-    for _, obj in ipairs(workspace:GetDescendants()) do
-        if obj:IsA("BasePart") and not obj.Anchored then
-            local ok = pcall(function() obj:SetNetworkOwner(nil) end)
-            if ok then n = n + 1 end
-        end
-    end
-    notify("NET", "Released " .. n .. " parts to server")
-    return n
-end
 
 -- ══════════════════════════════════════════════
 --   FORCE STATS
@@ -386,7 +340,7 @@ local function installMarketplaceHooks()
 end
 
 -- ══════════════════════════════════════════════
---   UNIVERSAL AC SHIELD (lean)
+--   UNIVERSAL AC SHIELD
 -- ══════════════════════════════════════════════
 local function installUniversalShield()
     if genv.BoltShield then return end
@@ -494,25 +448,6 @@ end
 -- ══════════════════════════════════════════════
 --   ACTIONS
 -- ══════════════════════════════════════════════
-local function Fling(target)
-    if not target or not target.Character then return end
-    local tHRP = target.Character:FindFirstChild("HumanoidRootPart")
-    if not tHRP then return end
-    SafeNO(tHRP)
-    for _, d in ipairs(target.Character:GetDescendants()) do
-        if d:IsA("Motor6D") and d.Name ~= "RootJoint" then pcall(function() d:Destroy() end) end
-    end
-    local bv = Instance.new("BodyVelocity", tHRP)
-    bv.MaxForce = Vector3.new(math.huge, math.huge, math.huge)
-    bv.Velocity = (tHRP.CFrame.LookVector * 70) + Vector3.new(0, 50, 0)
-    bv.P = 1250; Debris:AddItem(bv, 0.4)
-    local av = Instance.new("BodyAngularVelocity", tHRP)
-    av.MaxTorque = Vector3.new(math.huge, math.huge, math.huge)
-    av.AngularVelocity = Vector3.new(math.random(-60, 60), math.random(-60, 60), math.random(-60, 60))
-    av.P = 1250; Debris:AddItem(av, 0.4)
-end
-local function FlingAll() for _, p in ipairs(AllPlayers()) do pcall(Fling, p) end end
-
 local function Invisible(on)
     local c = GetChar() if not c then return end
     if on then
@@ -541,6 +476,7 @@ local function Freeze(target)
         end
     end
 end
+
 local function Thaw(target)
     if not target or target == LP then
         local h = GetHum() if h then h.WalkSpeed = 16 h.JumpPower = 50 end
@@ -559,7 +495,6 @@ local function Fly(on, speed)
     if not on then return end
     genv.BoltFlySpeed = speed or genv.BoltFlySpeed or 80
     local hrp = GetHRP() if not hrp then return end
-    SafeNO(hrp)
     local bv = Instance.new("BodyVelocity", hrp)
     bv.MaxForce = Vector3.new(9e9, 9e9, 9e9)
     genv.BoltFlyBV = bv
@@ -612,6 +547,7 @@ local function SpinSelf(on)
         end)
     end
 end
+
 local function SpinAll(on)
     if genv.BoltSpinAll then pcall(function() genv.BoltSpinAll:Disconnect() end) genv.BoltSpinAll = nil end
     if on then
@@ -932,7 +868,7 @@ local function Cleanup()
         end
         if genv.BoltFlyBV then pcall(function() genv.BoltFlyBV:Destroy() end) genv.BoltFlyBV = nil end
         if genv.BoltClone then pcall(function() genv.BoltClone:Destroy() end) genv.BoltClone = nil end
-        genv.BoltFlingAll = false; genv.BoltAutoClick = false
+        genv.BoltAutoClick = false
         if ForceStats.conn then pcall(function() ForceStats.conn:Disconnect() end) ForceStats.conn = nil end
         ForceStats.enabled = false
     end)
@@ -1384,7 +1320,6 @@ local tGames    = Tab("Games",      "🎮")
 local tCombat   = Tab("Combat",     "🎯")
 local tChat     = Tab("Chat",       "💬")
 local tBypass   = Tab("Bypass AC",  "🔓")
-local tNetwork  = Tab("Network",    "🌐")
 local tSettings = Tab("Settings",   "⚙")
 
 -- ═══ DISCORDS ═══
@@ -1471,15 +1406,6 @@ Sec(tMain, "Force Stats (Anti-Reset)")
 Tog(tMain, "Force Stats", "Re-applies WS / JP / HH every frame", function(on)
     if on then startForceStats() else stopForceStats() end
 end)
-
-Sec(tMain, "Fling")
-Tog(tMain, "Fling All (Loop)", "Continuous fling", function(on)
-    if on then
-        genv.BoltFlingAll = true
-        task.spawn(function() while genv.BoltFlingAll do FlingAll() task.wait(.15) end end)
-    else genv.BoltFlingAll = false end
-end)
-Btn(tMain, "Fling Once", "One-shot fling on all", FlingAll)
 
 Sec(tMain, "Player Control")
 Btn(tMain, "Ragdoll Self", "Break joints", Ragdoll)
@@ -1893,22 +1819,6 @@ Tog(tBypass, "Stop Lagback", "Snap-back position protection", function(on)
             else genv.BoltLastCF = hrp.CFrame end
         else genv.BoltLastCF = hrp.CFrame end
     end)
-end)
-
--- ═══ NETWORK ═══
-Sec(tNetwork, "Claim")
-Btn(tNetwork, "Claim All Parts", "Full workspace sweep", function()
-    claimAllParts()
-end)
-Btn(tNetwork, "Claim Nearby (200 studs)", "Fast native spatial query", function()
-    claimNearbyParts(200)
-end)
-Btn(tNetwork, "Claim Nearby (500 studs)", "Wider radius", function()
-    claimNearbyParts(500)
-end)
-Sec(tNetwork, "Release")
-Btn(tNetwork, "Release All Parts", "Hand ownership back to server", function()
-    releaseAllParts()
 end)
 
 -- ═══ SETTINGS ═══
