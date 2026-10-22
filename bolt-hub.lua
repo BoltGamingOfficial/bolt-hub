@@ -1,9 +1,5 @@
 --[[
-    ⚡ BOLT HUB v7.4 — ULTIMATE CATALOG BUILD ⚡
-    • Scream and Run tab removed
-    • Universal hubs expanded (Shiro, Galaxy, ROXCOM, ZHub, Plenum, 67Hub)
-    • Game-specific hubs expanded (Blox Fruits, MM2, Da Hood, Arsenal, Jailbreak, RIVALS)
-    • Launch notifications silenced
+    ⚡ BOLT HUB - THE ULTIMATE ROBLOX HUB ⚡
 ]]
 
 -- ─── Services ───
@@ -34,11 +30,33 @@ local newc          = newcclosure or function(f) return f end
 local unpack        = table.unpack or unpack
 local identify      = identifyexecutor or function() return "Unknown" end
 
--- ─── Wipe previous instance if re-executed ───
-if genv.BoltHub then pcall(function() genv.BoltHub:Destroy() end) genv.BoltHub = nil end
-if genv.BoltIcon then pcall(function() genv.BoltIcon:Destroy() end) genv.BoltIcon = nil end
-if genv.BoltNetAdd then pcall(function() genv.BoltNetAdd:Disconnect() end) genv.BoltNetAdd = nil end
-if genv.BoltNetTimer then pcall(function() task.cancel(genv.BoltNetTimer) end) genv.BoltNetTimer = nil end
+-- ══════════════════════════════════════════════
+--   FULL RE-EXEC WIPE (fixes stacking)
+-- ══════════════════════════════════════════════
+local function wipeOld()
+    -- Kill threads first
+    if genv.BoltNetTimer then pcall(task.cancel, genv.BoltNetTimer) genv.BoltNetTimer = nil end
+    -- Kill connections
+    for _, k in ipairs({
+        "BoltNetAdd", "BoltDeltaClamp", "BoltFly", "BoltNoclip", "BoltSpin",
+        "BoltSpinAll", "BoltFullbright", "BoltLagback", "BoltAntiAfk", "BoltGod",
+        "BoltRegen", "BoltFollow", "BoltInfJump", "BoltClick", "BoltExploitChat",
+    }) do
+        local v = genv[k]
+        if v then pcall(function() v:Disconnect() end) genv[k] = nil end
+    end
+    -- Kill instances
+    if genv.BoltHub then pcall(function() genv.BoltHub:Destroy() end) genv.BoltHub = nil end
+    if genv.BoltIcon then pcall(function() genv.BoltIcon:Destroy() end) genv.BoltIcon = nil end
+    if genv.BoltFlyBV then pcall(function() genv.BoltFlyBV:Destroy() end) genv.BoltFlyBV = nil end
+    if genv.BoltClone then pcall(function() genv.BoltClone:Destroy() end) genv.BoltClone = nil end
+    -- Reset runtime flags (but NOT hook-installed flags)
+    genv.BoltFlingAll = false
+    genv.BoltAutoClick = false
+    genv.BoltGlobalFake = false
+    genv.BoltAutoNet = false
+end
+wipeOld()
 
 -- ─── Capability Scanner ───
 local CAP = {}
@@ -86,15 +104,12 @@ local function registerFeature(name, deps, fn)
 end
 
 local function reportPruned()
-    if #PRUNED == 0 then
-        print("[BOLT] All features supported. No pruning needed."); return
-    end
+    if #PRUNED == 0 then print("[BOLT] All features supported."); return end
     local lines = { "[BOLT] PRUNED FEATURES (" .. #PRUNED .. "):" }
     for _, p in ipairs(PRUNED) do
         table.insert(lines, "  · " .. p.name .. " — missing: " .. tostring(p.missing))
     end
-    local msg = table.concat(lines, "\n")
-    print(msg); pcall(function() warn(msg) end)
+    print(table.concat(lines, "\n"))
 end
 
 -- ══════════════════════════════════════════════
@@ -165,8 +180,12 @@ local function Pad(p, t, r, b, l)
         PaddingBottom = UDim.new(0, b or 0), PaddingLeft = UDim.new(0, l or 0), Parent = p })
 end
 
--- ─── Notifications (silent on launch) ───
+-- ─── Notifications (throttled) ───
+local lastNotify = 0
 local function notify(title, text, dur)
+    local now = tick()
+    if now - lastNotify < 0.1 then return end
+    lastNotify = now
     pcall(function()
         StarterGui:SetCore("SendNotification", {
             Title = title or "BOLT", Text = text or "", Duration = dur or 3
@@ -191,9 +210,7 @@ end
 -- ══════════════════════════════════════════════
 --   FORCE STATS
 -- ══════════════════════════════════════════════
-local ForceStats = {
-    enabled = false, walkSpeed = 100, jumpPower = 100, hipHeight = 2, conn = nil,
-}
+local ForceStats = { enabled = false, walkSpeed = 100, jumpPower = 100, hipHeight = 2, conn = nil }
 
 local function startForceStats()
     if ForceStats.conn then ForceStats.conn:Disconnect() end
@@ -213,34 +230,43 @@ local function stopForceStats()
 end
 
 -- ══════════════════════════════════════════════
---   AUTO NETWORK OWNERSHIP
+--   AUTO NETWORK OWNERSHIP (REWRITTEN — LIGHT)
 -- ══════════════════════════════════════════════
 local AutoNet = { enabled = true, claimedCount = 0 }
+local AUTO_RADIUS = 200
 
-local function claimPart(part)
-    if not AutoNet.enabled then return false end
-    if not part or not part:IsA("BasePart") or part.Anchored then return false end
-    local ok = pcall(function() part:SetNetworkOwner(LP) end)
-    if ok then AutoNet.claimedCount = AutoNet.claimedCount + 1 end
-    return ok
-end
-
-local function sweepWorkspace()
-    if not AutoNet.enabled then return end
-    for _, obj in ipairs(workspace:GetDescendants()) do
-        if obj:IsA("BasePart") and not obj.Anchored then
-            pcall(function() obj:SetNetworkOwner(LP) end)
-        end
-    end
+local function getHRPPos()
+    local hrp = GetHRP()
+    return hrp and hrp.Position
 end
 
 local function installAutoNetwork()
     if genv.BoltAutoNet then return end
     genv.BoltAutoNet = true
-    task.spawn(sweepWorkspace)
-    genv.BoltNetAdd = workspace.DescendantAdded:Connect(function(obj)
-        if obj:IsA("BasePart") and not obj.Anchored then task.defer(function() claimPart(obj) end) end
+
+    -- ONE-TIME initial sweep, radius-limited
+    task.spawn(function()
+        local pos = getHRPPos()
+        if not pos then return end
+        for _, obj in ipairs(workspace:GetDescendants()) do
+            if obj:IsA("BasePart") and not obj.Anchored
+               and (obj.Position - pos).Magnitude < AUTO_RADIUS then
+                pcall(function() obj:SetNetworkOwner(LP) end)
+            end
+        end
     end)
+
+    -- Claim newly spawned parts, but only within radius
+    genv.BoltNetAdd = workspace.DescendantAdded:Connect(function(obj)
+        if not obj:IsA("BasePart") or obj.Anchored then return end
+        local pos = getHRPPos()
+        if pos and (obj.Position - pos).Magnitude < AUTO_RADIUS then
+            pcall(function() obj:SetNetworkOwner(LP) end)
+            AutoNet.claimedCount = AutoNet.claimedCount + 1
+        end
+    end)
+
+    -- Own character on respawn
     LP.CharacterAdded:Connect(function(char)
         task.wait(0.5)
         for _, d in ipairs(char:GetDescendants()) do
@@ -249,16 +275,14 @@ local function installAutoNetwork()
             end
         end
     end)
-    genv.BoltNetTimer = task.spawn(function()
-        while AutoNet.enabled do task.wait(10); pcall(sweepWorkspace) end
-    end)
+    -- NO 10s sweep timer — that was the killer
 end
 
 local function disableAutoNetwork()
     AutoNet.enabled = false
     if genv.BoltNetAdd then pcall(function() genv.BoltNetAdd:Disconnect() end) genv.BoltNetAdd = nil end
-    if genv.BoltNetTimer then pcall(function() task.cancel(genv.BoltNetTimer) end) genv.BoltNetTimer = nil end
     genv.BoltAutoNet = false
+    -- Release everything
     for _, obj in ipairs(workspace:GetDescendants()) do
         if obj:IsA("BasePart") and not obj.Anchored then
             pcall(function() obj:SetNetworkOwner(nil) end)
@@ -267,7 +291,9 @@ local function disableAutoNetwork()
 end
 
 local function enableAutoNetwork()
-    AutoNet.enabled = true; AutoNet.claimedCount = 0; installAutoNetwork()
+    AutoNet.enabled = true
+    AutoNet.claimedCount = 0
+    installAutoNetwork()
 end
 
 -- ══════════════════════════════════════════════
@@ -300,18 +326,16 @@ end
 -- ══════════════════════════════════════════════
 --   FAKER ENGINE
 -- ══════════════════════════════════════════════
-local FakeData = {
-    gamepasses = {}, products = {}, seen = {}, listeners = {},
-    globalOn = false, autoFake = false, hookedMP = false,
-}
+local FakeData = { gamepasses = {}, products = {}, seen = {}, listeners = {},
+    globalOn = false, autoFake = false }
 
 local function fetchProductInfo(id, isGamepass)
     local infoType = isGamepass and Enum.InfoType.GamePass or Enum.InfoType.Product
     local ok, info = pcall(function() return MarketplaceService:GetProductInfo(id, infoType) end)
     if ok and info and type(info) == "table" then
-        return info.Name or ("Unknown " .. (isGamepass and "Gamepass" or "Product")), info.PriceInRobux
+        return info.Name or ("Unknown"), info.PriceInRobux
     end
-    return "Unknown " .. (isGamepass and "Gamepass" or "Product"), nil
+    return "Unknown", nil
 end
 
 local function addFakeEntry(tbl, id, name, source, isGamepass)
@@ -321,16 +345,12 @@ local function addFakeEntry(tbl, id, name, source, isGamepass)
     if FakeData.seen[key] then return end
     FakeData.seen[key] = true
     local displayName, price = name, nil
-    if not displayName or displayName == "Prompt" or displayName == "Check"
-       or displayName == "Info" or displayName == "Remote" then
+    if not displayName or displayName == "Prompt" or displayName == "Check" then
         displayName, price = fetchProductInfo(id, isGamepass)
     end
-    local entry = {
-        id = id, name = displayName or ("Unknown " .. (isGamepass and "Gamepass" or "Product")),
-        price = price, source = source or "?", isGamepass = isGamepass,
-    }
+    local entry = { id = id, name = displayName or "Unknown",
+        price = price, source = source or "?", isGamepass = isGamepass }
     table.insert(tbl, entry)
-    notify("SCAN", (isGamepass and "Gamepass" or "Product") .. " " .. id .. " · " .. entry.name)
     for _, fn in ipairs(FakeData.listeners) do pcall(fn, entry) end
     if FakeData.autoFake then
         task.spawn(function()
@@ -352,20 +372,11 @@ local function fakePurchase(gamepassId, productId)
                 pcall(function()
                     replicatesignal(MarketplaceService.PromptGamePassPurchaseFinished, LP.UserId, gamepassId, true)
                 end)
-                pcall(function()
-                    replicatesignal(MarketplaceService.PromptGamePassPurchaseFinished, LP, gamepassId)
-                end)
             end
             pcall(function() MarketplaceService:SignalPromptGamePassPurchaseFinished(LP.UserId, gamepassId, true) end)
-            if CAP.firesignal then
-                pcall(function()
-                    firesignal(MarketplaceService.PromptGamePassPurchaseFinished, LP, gamepassId, true)
-                end)
-            end
         end
-        blast(); task.delay(0.05, blast); task.delay(0.2, blast)
-        task.delay(0.5, blast); task.delay(1.0, blast)
-        notify("FAKE", "Blast fired " .. firedCount .. "× for gamepass " .. gamepassId)
+        blast(); task.delay(0.05, blast); task.delay(0.2, blast); task.delay(0.5, blast)
+        notify("FAKE", "Gamepass " .. gamepassId .. " fired")
         return true
     end
     if productId then
@@ -376,23 +387,11 @@ local function fakePurchase(gamepassId, productId)
                     replicatesignal(MarketplaceService.PromptProductPurchaseFinished, LP.UserId, productId, true)
                     firedCount = firedCount + 1
                 end)
-                pcall(function()
-                    replicatesignal(MarketplaceService.PromptProductPurchaseFinished, LP, productId, true)
-                end)
             end
             pcall(function() MarketplaceService:SignalPromptProductPurchaseFinished(LP.UserId, productId, true) end)
-            if CAP.firesignal then
-                pcall(function()
-                    firesignal(MarketplaceService.PromptProductPurchaseFinished, LP.UserId, productId, true)
-                end)
-            end
-            if CAP.replicatesignal then
-                pcall(function() replicatesignal(MarketplaceService.PromptPurchaseFinished, LP, productId, true) end)
-            end
         end
-        blast(); task.delay(0.05, blast); task.delay(0.2, blast)
-        task.delay(0.5, blast); task.delay(1.0, blast)
-        notify("FAKE", "Blast fired " .. firedCount .. "× for product " .. productId)
+        blast(); task.delay(0.05, blast); task.delay(0.2, blast); task.delay(0.5, blast)
+        notify("FAKE", "Product " .. productId .. " fired")
         return true
     end
     return false
@@ -400,61 +399,22 @@ end
 _G.BoltFakePurchase = fakePurchase
 
 local function installMarketplaceHooks()
-    if FakeData.hookedMP or not CAP.getrawmetatable then return end
-    FakeData.hookedMP = true
+    if genv.BoltMPHooked or not CAP.getrawmetatable then return end
+    genv.BoltMPHooked = true
     local mt = getrawmt(MarketplaceService); if not mt then return end
-    local oldIdx = mt.__index; local oldNC = mt.__namecall
-    pcall(function() setro(mt, false) end)
-    mt.__index = newc(function(self, key)
-        if key == "ProcessReceipt" and FakeData.globalOn then
-            return function() return Enum.ProductPurchaseDecision.PurchaseGranted end
-        end
-        if oldIdx then return oldIdx(self, key) end
-    end)
-    mt.__namecall = newc(function(self, ...)
-        local method = getnamecallmethod and getnamecallmethod() or ""
-        local args = { ... }
-        if method == "UserOwnsGamePassAsync" then
-            if FakeData.globalOn then return true end
-            local id = args[2] or args[1]
-            if id then for _, e in ipairs(FakeData.gamepasses) do if e.id == id then return true end end end
-        end
-        if method == "PlayerOwnsAsset" or method == "OwnsAsset" then
-            if FakeData.globalOn then return true end
-            local id = args[2] or args[1]
-            if id then
-                for _, e in ipairs(FakeData.gamepasses) do if e.id == id then return true end end
-                for _, e in ipairs(FakeData.products) do if e.id == id then return true end end
-            end
-        end
-        return oldNC and oldNC(self, ...) or nil
-    end)
-    pcall(function() setro(mt, true) end)
-end
-
-local function installDetectionHooks()
-    if genv.BoltDetectHooks or not CAP.getrawmetatable then return end
-    genv.BoltDetectHooks = true
-    local mt = getrawmt(game); if not mt then return end
-    local old = mt.__namecall
+    local oldNC = mt.__namecall
     pcall(function() setro(mt, false) end)
     mt.__namecall = newc(function(self, ...)
         local method = getnamecallmethod and getnamecallmethod() or ""
-        local args = { ... }
-        if method == "PromptGamePassPurchase" then
-            addFakeEntry(FakeData.gamepasses, args[2] or args[1], nil, "Prompt", true)
-        elseif method == "PromptProductPurchase" then
-            addFakeEntry(FakeData.products, args[2] or args[1], nil, "Prompt", false)
-        elseif method == "UserOwnsGamePassAsync" then
-            addFakeEntry(FakeData.gamepasses, args[2] or args[1], nil, "Check", true)
-        end
-        return old(self, ...)
+        if method == "UserOwnsGamePassAsync" and FakeData.globalOn then return true end
+        if method == "PlayerOwnsAsset" and FakeData.globalOn then return true end
+        return oldNC(self, ...)
     end)
     pcall(function() setro(mt, true) end)
 end
 
 -- ══════════════════════════════════════════════
---   UNIVERSAL AC SHIELD
+--   UNIVERSAL AC SHIELD (LEAN — no __index/__newindex)
 -- ══════════════════════════════════════════════
 local function installUniversalShield()
     if genv.BoltShield then return end
@@ -467,32 +427,40 @@ local function installUniversalShield()
         Banned = true, SetSetting = true, SetFlag = true }
     local blockedPrefixes = { "adonis", "ad0nis", "kick", "ban", "detect", "flag" }
     local mt = getrawmt(game); if not mt then return end
-    local oldNC = mt.__namecall; local oldIdx = mt.__index; local oldNew = mt.__newindex
+    local oldNC = mt.__namecall
     pcall(function() setro(mt, false) end)
     mt.__namecall = newc(function(self, ...)
         local method = getnamecallmethod and getnamecallmethod() or ""
         if blockedMethods[method] then return end
         local low = method:lower()
-        for _, p in ipairs(blockedPrefixes) do if low:sub(1, #p) == p then return end end
-        if method == "UserOwnsGamePassAsync" or method == "PlayerOwnsAsset" then
-            if genv.BoltGlobalFake then return true end
+        for _, p in ipairs(blockedPrefixes) do
+            if low:sub(1, #p) == p then return end
         end
         return oldNC(self, ...)
     end)
-    mt.__index = newc(function(self, key)
-        if key == "ProcessReceipt" and genv.BoltGlobalFake then
-            return function() return Enum.ProductPurchaseDecision.PurchaseGranted end
-        end
-        return oldIdx(self, key)
-    end)
-    mt.__newindex = newc(function(self, key, value)
-        if type(key) == "string" then
-            local low = key:lower()
-            for _, p in ipairs({ "detected", "flagged", "banned", "cheat" }) do
-                if low:find(p, 1, true) then return end
+    pcall(function() setro(mt, true) end)
+end
+
+local function installDetectionHooks()
+    if genv.BoltDetectHooks or not CAP.getrawmetatable then return end
+    genv.BoltDetectHooks = true
+    local mt = getrawmt(game); if not mt then return end
+    local old = mt.__namecall
+    pcall(function() setro(mt, false) end)
+    mt.__namecall = newc(function(self, ...)
+        local method = getnamecallmethod and getnamecallmethod() or ""
+        if method == "PromptGamePassPurchase" or method == "PromptProductPurchase"
+           or method == "UserOwnsGamePassAsync" then
+            local args = { ... }
+            if method == "PromptGamePassPurchase" then
+                addFakeEntry(FakeData.gamepasses, args[2] or args[1], nil, "Prompt", true)
+            elseif method == "PromptProductPurchase" then
+                addFakeEntry(FakeData.products, args[2] or args[1], nil, "Prompt", false)
+            else
+                addFakeEntry(FakeData.gamepasses, args[2] or args[1], nil, "Check", true)
             end
         end
-        return oldNew(self, key, value)
+        return old(self, ...)
     end)
     pcall(function() setro(mt, true) end)
 end
@@ -501,7 +469,7 @@ local function installDeltaClamp(studsPerFrame)
     if genv.BoltDeltaClamp then genv.BoltDeltaClamp:Disconnect() end
     local last = nil
     genv.BoltDeltaClamp = RunService.Heartbeat:Connect(function()
-        local hrp = GetHRP(); if not hrp then return end
+        local hrp = GetHRP(); if not hrp then last = nil return end
         if last then
             local delta = (hrp.Position - last).Magnitude
             if delta > (studsPerFrame or 45) then
@@ -515,14 +483,14 @@ end
 local function installRemoteGuard()
     if genv.BoltRemoteGuard or not CAP.getrawmetatable then return end
     genv.BoltRemoteGuard = true
-    local blacklist = { "kick", "ban", "detect", "flag", "cheat", "exploit" }
     local hooked = {}
     local function sanitize(v)
-        if type(v) == "string" then
-            local low = v:lower()
-            for _, b in ipairs(blacklist) do
-                if low:find(b, 1, true) then return "[filtered]" end
-            end
+        if type(v) ~= "string" or #v < 4 then return v end
+        local low = v:lower()
+        if low:find("kick", 1, true) or low:find("ban", 1, true)
+           or low:find("detect", 1, true) or low:find("flag", 1, true)
+           or low:find("cheat", 1, true) or low:find("exploit", 1, true) then
+            return "[filtered]"
         end
         return v
     end
@@ -533,11 +501,14 @@ local function installRemoteGuard()
         local old = mt.__namecall
         pcall(function() setro(mt, false) end)
         mt.__namecall = newc(function(self, ...)
-            local method = getnamecallmethod and getnamecallmethod() or ""
-            if method == "FireServer" then
+            if getnamecallmethod and getnamecallmethod() == "FireServer" then
                 local args = { ... }
-                for i = 1, #args do args[i] = sanitize(args[i]) end
-                return old(self, unpack(args))
+                local changed = false
+                for i = 1, #args do
+                    local s = sanitize(args[i])
+                    if s ~= args[i] then args[i] = s; changed = true end
+                end
+                if changed then return old(self, unpack(args)) end
             end
             return old(self, ...)
         end)
@@ -729,18 +700,10 @@ local function lowGfx(on)
                     table.insert(genv.BoltGfxStore, { obj = d, prop = "Transparency", val = d.Transparency })
                     d.Transparency = 1
                 end
-            elseif d:IsA("PointLight") or d:IsA("SpotLight") or d:IsA("SurfaceLight") then
-                if d.Enabled then
-                    table.insert(genv.BoltGfxStore, { obj = d, prop = "Enabled", val = true })
-                    d.Enabled = false
-                end
             end
         end
-        genv.BoltGfxShadow = Lighting.GlobalShadows
-        genv.BoltGfxFog = Lighting.FogEnd
         Lighting.GlobalShadows = false
         Lighting.FogEnd = 1e6
-        pcall(function() settings().Rendering.QualityLevel = Enum.QualityLevel.Level01 end)
     else
         if genv.BoltGfxStore then
             for _, e in ipairs(genv.BoltGfxStore) do
@@ -748,9 +711,7 @@ local function lowGfx(on)
             end
             genv.BoltGfxStore = nil
         end
-        Lighting.GlobalShadows = genv.BoltGfxShadow ~= false
-        Lighting.FogEnd = genv.BoltGfxFog or 100000
-        pcall(function() settings().Rendering.QualityLevel = Enum.QualityLevel.Level10 end)
+        Lighting.GlobalShadows = true
     end
 end
 
@@ -775,11 +736,6 @@ end
 local function setShiftLock(state)
     if state == nil then state = not LP.DevEnableMouseLock end
     pcall(function() LP.DevEnableMouseLock = state end)
-    pcall(function()
-        VirtualInput:SendKeyEvent(true, Enum.KeyCode.LeftShift, false, game)
-        task.wait(0.05)
-        VirtualInput:SendKeyEvent(false, Enum.KeyCode.LeftShift, false, game)
-    end)
 end
 
 local function godMode(on)
@@ -844,10 +800,7 @@ local function spectate(name)
 end
 
 local function fpsUnlock()
-    if CAP.setfpscap then
-        pcall(function() setfpscap(1000) end)
-        notify("BOLT", "FPS unlocked")
-    else notify("BOLT", "setfpscap not supported") end
+    if CAP.setfpscap then pcall(function() setfpscap(1000) end) end
 end
 
 local function setScale(mult)
@@ -905,7 +858,7 @@ Cor(LogoTile, 5); drawBolt(LogoTile, 20)
 
 C("TextLabel", {
     Size = UDim2.new(0, 200, 1, 0), Position = UDim2.new(0, 42, 0, 0),
-    BackgroundTransparency = 1, Text = "Bolt Hub v7.4",
+    BackgroundTransparency = 1, Text = "Bolt Hub v7.5",
     TextColor3 = TX, TextSize = 13, Font = Enum.Font.GothamMedium,
     TextXAlignment = Enum.TextXAlignment.Left, Parent = Top
 })
@@ -955,16 +908,13 @@ local ICON_SIZE = 46
 local Icon = C("Frame", {
     Name = "Icon", Size = UDim2.new(0, ICON_SIZE, 0, ICON_SIZE),
     Position = UDim2.new(0, 24, 1, -70),
-    BackgroundColor3 = GOLD, BorderSizePixel = 0,
-    Visible = false, Parent = IconGui
+    BackgroundColor3 = GOLD, BorderSizePixel = 0, Visible = false, Parent = IconGui
 })
 Cor(Icon, 10); Stroke(Icon, BLACK, 1, 0.7); drawBolt(Icon, 34)
 
 Icon.InputBegan:Connect(function(input)
     if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-        local ds = input.Position
-        local sp = Icon.Position
-        local moved = false
+        local ds = input.Position; local sp = Icon.Position; local moved = false
         local conn, endConn
         conn = UIS.InputChanged:Connect(function(i)
             if i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch then
@@ -976,7 +926,7 @@ Icon.InputBegan:Connect(function(input)
         endConn = UIS.InputEnded:Connect(function(i)
             if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
                 conn:Disconnect(); endConn:Disconnect()
-                if not moved then M.Visible = true Icon.Visible = false end
+                if not moved then M.Visible = true; Icon.Visible = false end
             end
         end)
     end
@@ -987,76 +937,40 @@ Icon.MouseLeave:Connect(function() Tw(Icon, .12, { BackgroundColor3 = GOLD }) en
 local function MinimizeToIcon() M.Visible = false; Icon.Visible = true end
 local function RestoreFromIcon() M.Visible = true; Icon.Visible = false end
 
--- ══════════════════════════════════════════════
---   CLEANUP
--- ══════════════════════════════════════════════
 local isClosed = false
-
 local function Cleanup()
     if isClosed then return end
     isClosed = true
-
     if SG then pcall(function() SG.Enabled = false end) end
     if IconGui then pcall(function() IconGui.Enabled = false end) end
-
     local sgRef, icRef = SG, IconGui
     SG, IconGui = nil, nil
-    genv.BoltHub = nil
-    genv.BoltIcon = nil
-
+    genv.BoltHub = nil; genv.BoltIcon = nil
     task.spawn(function()
-        if sgRef then
-            pcall(function() sgRef.Parent = nil end)
-            pcall(function() sgRef:Destroy() end)
+        if sgRef then pcall(function() sgRef:Destroy() end) end
+        if icRef then pcall(function() icRef:Destroy() end) end
+        for _, k in ipairs({
+            "BoltFly", "BoltNoclip", "BoltSpin", "BoltSpinAll", "BoltFullbright",
+            "BoltLagback", "BoltAntiAfk", "BoltGod", "BoltRegen", "BoltFollow",
+            "BoltInfJump", "BoltDeltaClamp", "BoltClick", "BoltExploitChat",
+        }) do
+            local v = genv[k]
+            if v then pcall(function() v:Disconnect() end) genv[k] = nil end
         end
-        if icRef then
-            pcall(function() icRef.Parent = nil end)
-            pcall(function() icRef:Destroy() end)
-        end
-
-        pcall(function()
-            for _, k in ipairs({
-                "BoltFly", "BoltNoclip", "BoltSpin", "BoltSpinAll",
-                "BoltFullbright", "BoltLagback", "BoltAntiAfk", "BoltGod", "BoltRegen",
-                "BoltFollow", "BoltInfJump", "BoltDeltaClamp", "BoltClick",
-            }) do
-                local v = genv[k]
-                if v then
-                    pcall(function() v:Disconnect() end)
-                    genv[k] = nil
-                end
-            end
-        end)
-
-        if genv.BoltFlyBV then
-            pcall(function() genv.BoltFlyBV:Destroy() end)
-            genv.BoltFlyBV = nil
-        end
-
-        if genv.BoltClone then
-            pcall(function() genv.BoltClone:Destroy() end)
-            genv.BoltClone = nil
-        end
-
-        if genv.BoltFlingAll then genv.BoltFlingAll = false end
-        if genv.BoltAutoClick then genv.BoltAutoClick = false end
-
-        if ForceStats.conn then
-            pcall(function() ForceStats.conn:Disconnect() end)
-            ForceStats.conn = nil
-        end
+        if genv.BoltFlyBV then pcall(function() genv.BoltFlyBV:Destroy() end) genv.BoltFlyBV = nil end
+        if genv.BoltClone then pcall(function() genv.BoltClone:Destroy() end) genv.BoltClone = nil end
+        genv.BoltFlingAll = false; genv.BoltAutoClick = false
+        if ForceStats.conn then pcall(function() ForceStats.conn:Disconnect() end) ForceStats.conn = nil end
         ForceStats.enabled = false
-
         pcall(disableAutoNetwork)
     end)
 end
 
--- ─── Window buttons ───
 WinBtn("—", -68, function() MinimizeToIcon() end)
 WinBtn("×", -34, function() Cleanup() end, true, Color3.fromRGB(120, 30, 30))
 
 -- ══════════════════════════════════════════════
---   SIDEBAR + CENTER + SCANNER PANEL
+--   SIDEBAR + CENTER + SCANNER
 -- ══════════════════════════════════════════════
 local SIDE_W = 200
 local Left = C("Frame", {
@@ -1064,10 +978,8 @@ local Left = C("Frame", {
     Position = UDim2.new(0, 0, 0, TOP_H),
     BackgroundColor3 = PANEL, BorderSizePixel = 0, Parent = M
 })
-C("Frame", {
-    Size = UDim2.new(0, 1, 1, 0), Position = UDim2.new(1, -1, 0, 0),
-    BackgroundColor3 = EDGE, BorderSizePixel = 0, Parent = Left
-})
+C("Frame", { Size = UDim2.new(0, 1, 1, 0), Position = UDim2.new(1, -1, 0, 0),
+    BackgroundColor3 = EDGE, BorderSizePixel = 0, Parent = Left })
 C("TextLabel", {
     Size = UDim2.new(1, -28, 0, 16), Position = UDim2.new(0, 18, 0, 18),
     BackgroundTransparency = 1, Text = "TABS",
@@ -1095,13 +1007,10 @@ local Center = C("Frame", {
     BackgroundColor3 = BG, BorderSizePixel = 0, Parent = M
 })
 
-local Crumb = C("Frame", {
-    Size = UDim2.new(1, 0, 0, 36), BackgroundColor3 = PANEL, BorderSizePixel = 0, Parent = Center
-})
-C("Frame", {
-    Size = UDim2.new(1, 0, 0, 1), Position = UDim2.new(0, 0, 1, -1),
-    BackgroundColor3 = EDGE, BorderSizePixel = 0, Parent = Crumb
-})
+local Crumb = C("Frame", { Size = UDim2.new(1, 0, 0, 36),
+    BackgroundColor3 = PANEL, BorderSizePixel = 0, Parent = Center })
+C("Frame", { Size = UDim2.new(1, 0, 0, 1), Position = UDim2.new(0, 0, 1, -1),
+    BackgroundColor3 = EDGE, BorderSizePixel = 0, Parent = Crumb })
 local CrumbActive = C("Frame", {
     Size = UDim2.new(0, 140, 1, 0), Position = UDim2.new(0, 12, 0, 0),
     BackgroundTransparency = 1, Parent = Crumb
@@ -1117,17 +1026,14 @@ local CrumbLabel = C("TextLabel", {
     TextColor3 = TX, TextSize = 12, Font = Enum.Font.GothamMedium,
     TextXAlignment = Enum.TextXAlignment.Left, Parent = CrumbActive
 })
-C("Frame", {
-    Size = UDim2.new(1, 0, 0, 2), Position = UDim2.new(0, 0, 1, -2),
-    BackgroundColor3 = GOLD, BorderSizePixel = 0, Parent = CrumbActive
-})
+C("Frame", { Size = UDim2.new(1, 0, 0, 2), Position = UDim2.new(0, 0, 1, -2),
+    BackgroundColor3 = GOLD, BorderSizePixel = 0, Parent = CrumbActive })
 
 local SearchWrap = C("Frame", {
     Size = UDim2.new(1, -24, 0, 32), Position = UDim2.new(0, 12, 0, 46),
     BackgroundColor3 = CARD, BorderSizePixel = 0, Parent = Center
 })
-Cor(SearchWrap, 5)
-local SearchStroke = Stroke(SearchWrap, EDGE, 1)
+Cor(SearchWrap, 5); Stroke(SearchWrap, EDGE, 1)
 C("TextLabel", {
     Size = UDim2.new(0, 20, 1, 0), Position = UDim2.new(0, 10, 0, 0),
     BackgroundTransparency = 1, Text = "🔍", TextColor3 = TX_MUT,
@@ -1140,8 +1046,6 @@ local SearchBox = C("TextBox", {
     Font = Enum.Font.Gotham, ClearTextOnFocus = false,
     TextXAlignment = Enum.TextXAlignment.Left, Parent = SearchWrap
 })
-SearchBox.Focused:Connect(function() Tw(SearchStroke, .15, { Color = GOLD, Transparency = 0.5 }) end)
-SearchBox.FocusLost:Connect(function() Tw(SearchStroke, .15, { Color = EDGE, Transparency = 0 }) end)
 
 local Sc = C("ScrollingFrame", {
     Size = UDim2.new(1, -24, 1, -88), Position = UDim2.new(0, 12, 0, 86),
@@ -1159,10 +1063,8 @@ local Right = C("Frame", {
     Position = UDim2.new(1, -RIGHT_W, 0, TOP_H),
     BackgroundColor3 = PANEL, BorderSizePixel = 0, Parent = M
 })
-C("Frame", {
-    Size = UDim2.new(0, 1, 1, 0), Position = UDim2.new(0, 0, 0, 0),
-    BackgroundColor3 = EDGE, BorderSizePixel = 0, Parent = Right
-})
+C("Frame", { Size = UDim2.new(0, 1, 1, 0), Position = UDim2.new(0, 0, 0, 0),
+    BackgroundColor3 = EDGE, BorderSizePixel = 0, Parent = Right })
 C("TextLabel", {
     Size = UDim2.new(1, -28, 0, 16), Position = UDim2.new(0, 18, 0, 18),
     BackgroundTransparency = 1, Text = "SCANNER",
@@ -1204,10 +1106,8 @@ local function renderScanner()
         })
         for i = #FakeData.gamepasses, 1, -1 do
             local e = FakeData.gamepasses[i]
-            local row = C("Frame", {
-                Size = UDim2.new(1, 0, 0, 42), BackgroundColor3 = CARD_H,
-                BorderSizePixel = 0, Parent = ScannerScroll
-            })
+            local row = C("Frame", { Size = UDim2.new(1, 0, 0, 42), BackgroundColor3 = CARD_H,
+                BorderSizePixel = 0, Parent = ScannerScroll })
             Cor(row, 4)
             C("TextLabel", {
                 Size = UDim2.new(1, -12, 0, 12), Position = UDim2.new(0, 8, 0, 6),
@@ -1219,18 +1119,8 @@ local function renderScanner()
                 Size = UDim2.new(1, -12, 0, 10), Position = UDim2.new(0, 8, 0, 20),
                 BackgroundTransparency = 1, Text = "ID: " .. e.id .. (e.price and (" · " .. e.price .. " R$") or ""),
                 TextColor3 = TX_MUT, TextSize = 9, Font = Enum.Font.Gotham,
-                TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd, Parent = row
+                TextXAlignment = Enum.TextXAlignment.Left, Parent = row
             })
-            local cp = C("TextButton", {
-                Size = UDim2.new(0, 40, 0, 16), Position = UDim2.new(1, -92, 0, 13),
-                BackgroundColor3 = Color3.fromRGB(32, 32, 36), Text = "copy",
-                TextColor3 = TX_DIM, TextSize = 9, Font = Enum.Font.GothamMedium,
-                BorderSizePixel = 0, AutoButtonColor = false, Parent = row
-            })
-            Cor(cp, 3)
-            cp.MouseButton1Click:Connect(function()
-                setclipboard(tostring(e.id)); notify("BOLT", "Copied " .. e.id)
-            end)
             local fk = C("TextButton", {
                 Size = UDim2.new(0, 44, 0, 16), Position = UDim2.new(1, -48, 0, 13),
                 BackgroundColor3 = GOLD, Text = "fake", TextColor3 = BLACK,
@@ -1250,10 +1140,8 @@ local function renderScanner()
         })
         for i = #FakeData.products, 1, -1 do
             local e = FakeData.products[i]
-            local row = C("Frame", {
-                Size = UDim2.new(1, 0, 0, 42), BackgroundColor3 = CARD_H,
-                BorderSizePixel = 0, Parent = ScannerScroll
-            })
+            local row = C("Frame", { Size = UDim2.new(1, 0, 0, 42), BackgroundColor3 = CARD_H,
+                BorderSizePixel = 0, Parent = ScannerScroll })
             Cor(row, 4)
             C("TextLabel", {
                 Size = UDim2.new(1, -12, 0, 12), Position = UDim2.new(0, 8, 0, 6),
@@ -1263,20 +1151,10 @@ local function renderScanner()
             })
             C("TextLabel", {
                 Size = UDim2.new(1, -12, 0, 10), Position = UDim2.new(0, 8, 0, 20),
-                BackgroundTransparency = 1, Text = "ID: " .. e.id .. (e.price and (" · " .. e.price .. " R$") or ""),
+                BackgroundTransparency = 1, Text = "ID: " .. e.id,
                 TextColor3 = TX_MUT, TextSize = 9, Font = Enum.Font.Gotham,
-                TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd, Parent = row
+                TextXAlignment = Enum.TextXAlignment.Left, Parent = row
             })
-            local cp = C("TextButton", {
-                Size = UDim2.new(0, 40, 0, 16), Position = UDim2.new(1, -92, 0, 13),
-                BackgroundColor3 = Color3.fromRGB(32, 32, 36), Text = "copy",
-                TextColor3 = TX_DIM, TextSize = 9, Font = Enum.Font.GothamMedium,
-                BorderSizePixel = 0, AutoButtonColor = false, Parent = row
-            })
-            Cor(cp, 3)
-            cp.MouseButton1Click:Connect(function()
-                setclipboard(tostring(e.id)); notify("BOLT", "Copied " .. e.id)
-            end)
             local fk = C("TextButton", {
                 Size = UDim2.new(0, 44, 0, 16), Position = UDim2.new(1, -48, 0, 13),
                 BackgroundColor3 = GOLD, Text = "fake", TextColor3 = BLACK,
@@ -1288,43 +1166,35 @@ local function renderScanner()
         end
     end
 end
-table.insert(FakeData.listeners, function() renderScanner() end)
+
+-- Debounced scanner render — max ~6/sec
+local scanRenderScheduled = false
+local function requestScannerRender()
+    if scanRenderScheduled then return end
+    scanRenderScheduled = true
+    task.delay(0.15, function()
+        scanRenderScheduled = false
+        renderScanner()
+    end)
+end
+table.insert(FakeData.listeners, function() requestScannerRender() end)
 
 local Stat = C("Frame", {
     Size = UDim2.new(1, 0, 0, 22), Position = UDim2.new(0, 0, 1, -22),
     BackgroundColor3 = PANEL, BorderSizePixel = 0, Parent = M
 })
+C("Frame", { Size = UDim2.new(1, 0, 0, 1), Position = UDim2.new(0, 0, 0, 0),
+    BackgroundColor3 = EDGE, BorderSizePixel = 0, Parent = Stat })
 C("Frame", {
-    Size = UDim2.new(1, 0, 0, 1), Position = UDim2.new(0, 0, 0, 0),
-    BackgroundColor3 = EDGE, BorderSizePixel = 0, Parent = Stat
-})
-local StatusDot = C("Frame", {
     Size = UDim2.new(0, 6, 0, 6), Position = UDim2.new(0, 16, 0.5, -3),
     BackgroundColor3 = GREEN, BorderSizePixel = 0, Parent = Stat
 })
-Cor(StatusDot, 3)
 C("TextLabel", {
     Size = UDim2.new(0, 400, 1, 0), Position = UDim2.new(0, 30, 0, 0),
     BackgroundTransparency = 1, Text = "connected as " .. LP.Name,
     TextColor3 = TX_MUT, TextSize = 10, Font = Enum.Font.Gotham,
     TextXAlignment = Enum.TextXAlignment.Left, Parent = Stat
 })
-local function FootBtn(txt, x, cb)
-    local b = C("TextButton", {
-        Size = UDim2.new(0, 140, 0, 16), Position = UDim2.new(1, x, 0.5, -8),
-        BackgroundColor3 = PANEL, BackgroundTransparency = 1,
-        Text = txt, TextColor3 = TX_DIM, TextSize = 10,
-        Font = Enum.Font.Gotham, BorderSizePixel = 0,
-        AutoButtonColor = false, Parent = Stat
-    })
-    b.MouseEnter:Connect(function() Tw(b, .1, { TextColor3 = GOLD }) end)
-    b.MouseLeave:Connect(function() Tw(b, .1, { TextColor3 = TX_DIM }) end)
-    b.MouseButton1Click:Connect(function() pcall(cb) end)
-    return b
-end
-FootBtn("executor: " .. identify() .. "  ", -160, function()
-    notify("BOLT", "Executor: " .. identify())
-end)
 
 -- ══════════════════════════════════════════════
 --   COMPONENTS
@@ -1334,17 +1204,11 @@ local Tabs, Active = {}, nil
 local function SelTab(name)
     for k, v in pairs(Tabs) do
         if k == name then
-            v.b.BackgroundColor3 = CARD_H
-            v.stroke.Transparency = 0.7
-            v.stroke.Color = GOLD
-            Tw(v.t, .12, { TextColor3 = TX })
-            v.accent.Visible = true
+            v.b.BackgroundColor3 = CARD_H; v.stroke.Transparency = 0.7; v.stroke.Color = GOLD
+            Tw(v.t, .12, { TextColor3 = TX }); v.accent.Visible = true
         else
-            v.b.BackgroundColor3 = CARD
-            v.stroke.Transparency = 1
-            v.stroke.Color = EDGE
-            Tw(v.t, .12, { TextColor3 = TX_DIM })
-            v.accent.Visible = false
+            v.b.BackgroundColor3 = CARD; v.stroke.Transparency = 1; v.stroke.Color = EDGE
+            Tw(v.t, .12, { TextColor3 = TX_DIM }); v.accent.Visible = false
         end
     end
     Active = name
@@ -1384,17 +1248,12 @@ local function Tab(name, icon)
     Cor(accent, 1)
     local t = C("TextLabel", {
         Size = UDim2.new(1, -20, 1, 0), Position = UDim2.new(0, 16, 0, 0),
-        BackgroundTransparency = 1,
-        Text = (icon and icon .. "  " or "") .. name,
+        BackgroundTransparency = 1, Text = (icon and icon .. "  " or "") .. name,
         TextColor3 = TX_DIM, TextSize = 12, Font = Enum.Font.GothamMedium,
         TextXAlignment = Enum.TextXAlignment.Left, Parent = b
     })
-    b.MouseEnter:Connect(function()
-        if Active ~= name then Tw(b, .1, { BackgroundColor3 = CARD_H }) end
-    end)
-    b.MouseLeave:Connect(function()
-        if Active ~= name then Tw(b, .1, { BackgroundColor3 = CARD }) end
-    end)
+    b.MouseEnter:Connect(function() if Active ~= name then Tw(b, .1, { BackgroundColor3 = CARD_H }) end end)
+    b.MouseLeave:Connect(function() if Active ~= name then Tw(b, .1, { BackgroundColor3 = CARD }) end end)
     b.MouseButton1Click:Connect(function() SelTab(name) end)
     Tabs[name] = { b = b, t = t, accent = accent, stroke = stroke }
     return name
@@ -1407,8 +1266,7 @@ local function Btn(tab, txt, desc, cb)
         Text = "", BorderSizePixel = 0, AutoButtonColor = false, Parent = Sc
     })
     b:SetAttribute("Tab", tab)
-    Cor(b, 5)
-    local bs = Stroke(b, EDGE, 1); bs.Transparency = 1
+    Cor(b, 5); Stroke(b, EDGE, 1).Transparency = 1
     C("TextLabel", {
         Name = "Title", Size = UDim2.new(1, -40, 0, 18),
         Position = UDim2.new(0, 14, 0, desc and 10 or 11),
@@ -1424,19 +1282,8 @@ local function Btn(tab, txt, desc, cb)
             TextXAlignment = Enum.TextXAlignment.Left, Parent = b
         })
     end
-    C("TextLabel", {
-        Size = UDim2.new(0, 16, 1, 0), Position = UDim2.new(1, -22, 0, 0),
-        BackgroundTransparency = 1, Text = "›", TextColor3 = TX_MUT,
-        TextSize = 14, Font = Enum.Font.GothamBold, Parent = b
-    })
-    b.MouseEnter:Connect(function()
-        Tw(b, .1, { BackgroundColor3 = CARD_H })
-        Tw(bs, .1, { Color = GOLD, Transparency = 0.6 })
-    end)
-    b.MouseLeave:Connect(function()
-        Tw(b, .1, { BackgroundColor3 = CARD })
-        Tw(bs, .1, { Color = EDGE, Transparency = 1 })
-    end)
+    b.MouseEnter:Connect(function() Tw(b, .1, { BackgroundColor3 = CARD_H }) end)
+    b.MouseLeave:Connect(function() Tw(b, .1, { BackgroundColor3 = CARD }) end)
     b.MouseButton1Click:Connect(function()
         Tw(b, .07, { BackgroundColor3 = GOLD })
         task.delay(.08, function() Tw(b, .2, { BackgroundColor3 = CARD_H }) end)
@@ -1446,15 +1293,14 @@ local function Btn(tab, txt, desc, cb)
     return b
 end
 
-local function Tog(tab, txt, desc, cb)
-    local state = false
+local function Tog(tab, txt, desc, cb, initial)
+    local state = initial or false
     local b = C("TextButton", {
         Size = UDim2.new(1, 0, 0, 54), BackgroundColor3 = CARD,
         Text = "", BorderSizePixel = 0, AutoButtonColor = false, Parent = Sc
     })
     b:SetAttribute("Tab", tab)
-    Cor(b, 5)
-    local bs = Stroke(b, EDGE, 1); bs.Transparency = 1
+    Cor(b, 5); Stroke(b, EDGE, 1).Transparency = 1
     C("TextLabel", {
         Name = "Title", Size = UDim2.new(1, -70, 0, 18),
         Position = UDim2.new(0, 14, 0, 10),
@@ -1472,22 +1318,17 @@ local function Tog(tab, txt, desc, cb)
     end
     local tg = C("Frame", {
         Size = UDim2.new(0, 34, 0, 18), Position = UDim2.new(1, -48, 0.5, -9),
-        BackgroundColor3 = Color3.fromRGB(52, 52, 58), BorderSizePixel = 0, Parent = b
+        BackgroundColor3 = state and GOLD or Color3.fromRGB(52, 52, 58), BorderSizePixel = 0, Parent = b
     })
     Cor(tg, 9)
     local kn = C("Frame", {
-        Size = UDim2.new(0, 14, 0, 14), Position = UDim2.new(0, 2, 0.5, -7),
+        Size = UDim2.new(0, 14, 0, 14),
+        Position = state and UDim2.new(1, -16, 0.5, -7) or UDim2.new(0, 2, 0.5, -7),
         BackgroundColor3 = Color3.fromRGB(220, 220, 220), BorderSizePixel = 0, Parent = tg
     })
     Cor(kn, 7)
-    b.MouseEnter:Connect(function()
-        Tw(b, .1, { BackgroundColor3 = CARD_H })
-        Tw(bs, .1, { Color = EDGE_H, Transparency = 0.6 })
-    end)
-    b.MouseLeave:Connect(function()
-        Tw(b, .1, { BackgroundColor3 = CARD })
-        Tw(bs, .1, { Color = EDGE, Transparency = 1 })
-    end)
+    b.MouseEnter:Connect(function() Tw(b, .1, { BackgroundColor3 = CARD_H }) end)
+    b.MouseLeave:Connect(function() Tw(b, .1, { BackgroundColor3 = CARD }) end)
     b.MouseButton1Click:Connect(function()
         state = not state
         Tw(tg, .15, { BackgroundColor3 = state and GOLD or Color3.fromRGB(52, 52, 58) })
@@ -1538,17 +1379,13 @@ local function Inp(tab, txt, desc, placeholder, cb)
         AutoButtonColor = false, Parent = b
     })
     Cor(go, 4)
-    go.MouseEnter:Connect(function() Tw(go, .1, { BackgroundColor3 = GOLD_H }) end)
-    go.MouseLeave:Connect(function() Tw(go, .1, { BackgroundColor3 = GOLD }) end)
     go.MouseButton1Click:Connect(function() pcall(cb, box.Text) end)
     b.Visible = (tab == Active)
     return b
 end
 
 local function Sec(tab, txt)
-    local f = C("Frame", {
-        Size = UDim2.new(1, 0, 0, 22), BackgroundTransparency = 1, Parent = Sc
-    })
+    local f = C("Frame", { Size = UDim2.new(1, 0, 0, 22), BackgroundTransparency = 1, Parent = Sc })
     f:SetAttribute("Tab", tab)
     C("TextLabel", {
         Name = "Title", Size = UDim2.new(1, 0, 0, 16),
@@ -1581,13 +1418,13 @@ local tSettings = Tab("Settings",   "⚙")
 -- ═══ DISCORDS ═══
 Sec(tDiscord, "Community")
 Btn(tDiscord, "Copy Bolt Discord", "discord.gg/Ehte2SFpfu", function()
-    setclipboard("https://discord.gg/Ehte2SFpfu"); notify("BOLT", "Copied Discord")
+    setclipboard("https://discord.gg/Ehte2SFpfu")
 end)
 
 -- ═══ DEBUGGERS ═══
 Sec(tDebug, "Exploration")
 Btn(tDebug, "Open Dev Console", "F9-equivalent", function()
-    StarterGui:SetCore("DevConsoleVisible", true); notify("BOLT", "Console opened")
+    StarterGui:SetCore("DevConsoleVisible", true)
 end)
 Btn(tDebug, "Dump Workspace", "Clipboard: full hierarchy", function()
     local lines = { workspace:GetFullName() }
@@ -1599,21 +1436,7 @@ Btn(tDebug, "Dump Workspace", "Clipboard: full hierarchy", function()
         end
     end
     rec(workspace, 1); setclipboard(table.concat(lines, "\n"))
-    notify("BOLT", "Dumped " .. #lines .. " lines")
 end)
-Btn(tDebug, "Dump ReplicatedStorage", "Clipboard: full hierarchy", function()
-    local lines = { ReplicatedStorage:GetFullName() }
-    local function rec(o, depth)
-        if depth > 4 then return end
-        for _, c in ipairs(o:GetChildren()) do
-            table.insert(lines, string.rep("  ", depth) .. c.ClassName .. " — " .. c.Name)
-            rec(c, depth + 1)
-        end
-    end
-    rec(ReplicatedStorage, 1); setclipboard(table.concat(lines, "\n"))
-    notify("BOLT", "Dumped " .. #lines .. " lines")
-end)
-
 Sec(tDebug, "Remotes")
 Btn(tDebug, "Sigma-Spy Remote Spy", "Full remote spy with parser", function()
     loadHub("https://raw.githubusercontent.com/Knuxy92/Sigma-Spy/main/SigmaSpy.lua")
@@ -1645,17 +1468,8 @@ end)
 Btn(tGUIs, "FE Object Control Panel", "Become parts, auras, AI", function()
     loadHub("https://raw.githubusercontent.com/All-Roblox-Scripts/fe-object-control/main/source.lua")
 end)
-Btn(tGUIs, "FE Prime Hub", "Green baseplate support", function()
-    loadHub("https://raw.githubusercontent.com/ilikeices/script/refs/heads/main/primehubgreenbaseplatesupport.luau")
-end)
-Btn(tGUIs, "FE Ragdoll Engine", "Push Aura & Auto Ragdoll", function()
-    loadHub("https://raw.githubusercontent.com/TestingLua/Hubs/main/Ragdoll%20Engine.lua")
-end)
 Btn(tGUIs, "FE Ender", "Fling + teleport", function()
     loadHub("https://raw.githubusercontent.com/ilikeices/script/refs/heads/main/ender.luau")
-end)
-Btn(tGUIs, "FE Headless", "Enable/disable headless", function()
-    loadHub("https://gist.githubusercontent.com/TreeByte403/ae2620103048e56de7d0004e2df385d2/raw/ee3ac096491e5bc4bf99429ba80388b1cb75161e/FeHeadless.lua")
 end)
 
 -- ═══ MAIN ═══
@@ -1671,30 +1485,19 @@ Inp(tMain, "Set WalkSpeed", "Numeric value", "16", function(v)
     local n = tonumber(v); if not n then return end
     local h = GetHum(); if h then h.WalkSpeed = n end
     ForceStats.walkSpeed = n
-    notify("BOLT", "WalkSpeed = " .. n)
 end)
 Inp(tMain, "Set JumpPower", "Numeric value", "50", function(v)
     local n = tonumber(v); if not n then return end
     local h = GetHum(); if h then h.JumpPower = n end
     ForceStats.jumpPower = n
-    notify("BOLT", "JumpPower = " .. n)
 end)
 Inp(tMain, "Set Fly Speed", "Applies next Fly toggle", "80", function(v)
-    local n = tonumber(v); if n then genv.BoltFlySpeed = n notify("BOLT", "Fly Speed = " .. n) end
+    local n = tonumber(v); if n then genv.BoltFlySpeed = n end
 end)
 
 Sec(tMain, "Force Stats (Anti-Reset)")
 Tog(tMain, "Force Stats", "Re-applies WS / JP / HH every frame", function(on)
     if on then startForceStats() else stopForceStats() end
-end)
-Inp(tMain, "Force WalkSpeed", "Value used while Force Stats on", "100", function(v)
-    local n = tonumber(v); if n then ForceStats.walkSpeed = n notify("FORCE", "WS → " .. n) end
-end)
-Inp(tMain, "Force JumpPower", "Value used while Force Stats on", "100", function(v)
-    local n = tonumber(v); if n then ForceStats.jumpPower = n notify("FORCE", "JP → " .. n) end
-end)
-Inp(tMain, "Force HipHeight", "Value used while Force Stats on", "2", function(v)
-    local n = tonumber(v); if n then ForceStats.hipHeight = n notify("FORCE", "HH → " .. n) end
 end)
 
 Sec(tMain, "Fling")
@@ -1705,9 +1508,6 @@ Tog(tMain, "Fling All (Loop)", "Continuous fling", function(on)
     else genv.BoltFlingAll = false end
 end)
 Btn(tMain, "Fling Once", "One-shot fling on all", FlingAll)
-Btn(tMain, "Fling Random", "Fling a random player", function()
-    local ps = AllPlayers(); if #ps > 0 then Fling(ps[math.random(#ps)]) end
-end)
 
 Sec(tMain, "Player Control")
 Btn(tMain, "Ragdoll Self", "Break joints", Ragdoll)
@@ -1730,7 +1530,6 @@ end)
 Sec(tMain, "Sound Spam")
 Btn(tMain, "Sound Spam", "Default spam sound", function() SoundSpam(5801261657, 3) end)
 Btn(tMain, "Sound Spam Bass", "Bass boosted", function() SoundSpam(1838623382, 3) end)
-Btn(tMain, "Sound Spam Airhorn", "Airhorn", function() SoundSpam(6042053625, 3) end)
 
 Sec(tMain, "Character Edits")
 Btn(tMain, "Big Head", "Enlarge head", function()
@@ -1745,53 +1544,30 @@ end)
 -- ═══ PLAYER ═══
 Sec(tPlayer, "Comfort")
 Tog(tPlayer, "Anti-AFK", "Prevent idle kick", function(on) antiAfk(on) end)
-Tog(tPlayer, "Anti Lag / Low GFX", "Strip particles + decals + lights", function(on) lowGfx(on) end)
+Tog(tPlayer, "Anti Lag / Low GFX", "Strip particles + decals", function(on) lowGfx(on) end)
 Tog(tPlayer, "Loop Full Bright", "Constant lighting refresh", function(on) loopFullbright(on) end)
-
 Sec(tPlayer, "Camera")
 Btn(tPlayer, "Unlock Third Person", "Expand zoom range 0.5–128", unlockThirdPerson)
 Btn(tPlayer, "Toggle Shift Lock", "Enable / disable", function() setShiftLock(nil) end)
-
 Sec(tPlayer, "Survival")
 Tog(tPlayer, "God Mode", "Client-side — visual only", function(on) godMode(on) end)
 Tog(tPlayer, "Health Regen", "+1 HP per frame", function(on) healthRegen(on) end)
-
-Sec(tPlayer, "Stats")
-Inp(tPlayer, "Set WalkSpeed", "Applies now", "16", function(v)
-    local n = tonumber(v); if n then local h = GetHum(); if h then h.WalkSpeed = n end end
-end)
-Inp(tPlayer, "Set JumpPower", "Applies now", "50", function(v)
-    local n = tonumber(v); if n then local h = GetHum(); if h then h.JumpPower = n end end
-end)
-Tog(tPlayer, "Infinite Jump", "Jump any time", function(on)
-    if genv.BoltInfJump then pcall(function() genv.BoltInfJump:Disconnect() end) genv.BoltInfJump = nil end
-    if on then
-        genv.BoltInfJump = UIS.JumpRequest:Connect(function()
-            local h = GetHum(); if h then h:ChangeState(Enum.HumanoidStateType.Jumping) end
-        end)
-    end
-end)
-
 Sec(tPlayer, "Interaction")
 Tog(tPlayer, "Auto Clicker", "Left-click spam", function(on)
     if on then autoClicker(true, genv.BoltCps or 10) else autoClicker(false) end
 end)
 Inp(tPlayer, "Set CPS", "Clicks per second", "10", function(v)
-    local n = tonumber(v); if n then genv.BoltCps = n notify("BOLT", "CPS = " .. n) end
+    local n = tonumber(v); if n then genv.BoltCps = n end
 end)
-
 Sec(tPlayer, "Targets")
 Inp(tPlayer, "Follow Player", "Type name (partial ok)", "username...", function(v) followPlayer(v) end)
 Inp(tPlayer, "Spectate Player", "Type name (partial ok)", "username...", function(v) spectate(v) end)
 Btn(tPlayer, "Stop Following", "Detach follow loop", function()
     if genv.BoltFollow then genv.BoltFollow:Disconnect() genv.BoltFollow = nil end
-    notify("BOLT", "Follow stopped")
 end)
-
 Sec(tPlayer, "Misc")
 Btn(tPlayer, "FPS Unlock", "setfpscap(1000)", fpsUnlock)
 Btn(tPlayer, "Scale ×1.5", "Bigger character", function() setScale(1.5) end)
-Btn(tPlayer, "Scale ×0.5", "Smaller character", function() setScale(0.5) end)
 Btn(tPlayer, "Reset Scale", "Back to normal", resetScale)
 
 -- ═══ VR ═══
@@ -1802,16 +1578,12 @@ Tog(tVR, "VR Noclip", "No collision", function(on) Noclip(on) end)
 -- ═══ FAKERS ═══
 Sec(tFakers, "Global Mode")
 Tog(tFakers, "Global Fake", "Every query returns true", function(on)
-    FakeData.globalOn = on
-    genv.BoltGlobalFake = on
+    FakeData.globalOn = on; genv.BoltGlobalFake = on
     installMarketplaceHooks()
-    notify("FAKE", on and "GLOBAL MODE ON" or "Global mode off")
 end)
 Tog(tFakers, "Auto-Fake on Detect", "Blast when prompt captured", function(on)
     FakeData.autoFake = on
-    notify("FAKE", on and "Auto-Fake enabled" or "Auto-Fake disabled")
 end)
-
 Sec(tFakers, "Scanner")
 Btn(tFakers, "Deep Scan Game", "Find all gamepasses + products", function()
     FakeData.gamepasses = {}; FakeData.products = {}; FakeData.seen = {}
@@ -1830,488 +1602,309 @@ Btn(tFakers, "Deep Scan Game", "Find all gamepasses + products", function()
             end
         end
     end
-    notify("SCAN", "Deep scan · " .. #FakeData.gamepasses .. " gamepasses · " .. #FakeData.products .. " products")
 end)
 Btn(tFakers, "Fake ALL Detected", "Blast every captured ID at once", function()
-    local count = 0
-    for _, e in ipairs(FakeData.gamepasses) do fakePurchase(e.id, nil); count = count + 1 end
-    for _, e in ipairs(FakeData.products) do fakePurchase(nil, e.id); count = count + 1 end
-    notify("FAKE", "Fake blasted " .. count .. " items")
+    for _, e in ipairs(FakeData.gamepasses) do fakePurchase(e.id, nil) end
+    for _, e in ipairs(FakeData.products) do fakePurchase(nil, e.id) end
 end)
-
 Sec(tFakers, "Manual Fake")
 Inp(tFakers, "Fake Gamepass by ID", "Enter gamepass ID", "gamepass id...", function(id) fakePurchase(id, nil) end)
 Inp(tFakers, "Fake Product by ID", "Enter product ID", "product id...", function(id) fakePurchase(nil, id) end)
 
--- ═══ GAMES — ULTIMATE CATALOG (KEYLESS) ═══
-Sec(tGames, "Universal Keyless Hubs")
-Btn(tGames, "Shiro Hub (Universal)", "Keyless · multi-game", function()
+-- ═══ GAMES ═══
+Sec(tGames, "Universal Hubs")
+Btn(tGames, "Shiro Hub (Universal)", "Multi-game", function()
     loadHub("https://raw.githubusercontent.com/shironaxgi/Universal/refs/heads/main/shiro.lua")
 end)
-Btn(tGames, "Galaxy's Hub (Library)", "Keyless · custom UI library", function()
+Btn(tGames, "Galaxy's Hub (Library)", "Custom UI library", function()
     loadHub("https://raw.githubusercontent.com/Galaxy-BloxYT/Galaxy-s-Hub-lib-default-loading-UI/refs/heads/main/UI")
 end)
-Btn(tGames, "ROXCOM Hub (Universal)", "Keyless · troll + utility", function()
+Btn(tGames, "ROXCOM Hub (Universal)", "Troll + utility", function()
     loadHub("https://raw.githubusercontent.com/yasinklausss1/roxcom-hub/refs/heads/main/roxcom-hub.lua", true)
 end)
-Btn(tGames, "ZHub (Universal)", "Keyless · ESP + fly", function()
+Btn(tGames, "ZHub (Universal)", "ESP + fly", function()
     loadHub("https://raw.githubusercontent.com/ZHubTeam/zhubteam.github.io/main/zhub-script.lua")
 end)
-Btn(tGames, "Plenum Hub", "Keyless · simple all-in-one", function()
+Btn(tGames, "Plenum Hub", "Simple all-in-one", function()
     loadHub("https://raw.githubusercontent.com/GamerScripterYT/Plenum-Hub/main/loader")
 end)
-Btn(tGames, "67Hub Universal", "Keyless · 350+ scripts", function()
+Btn(tGames, "67Hub Universal", "350+ scripts", function()
     loadHub("https://raw.githubusercontent.com/GearV4isBack/25Bullets/refs/heads/main/67Hub.lua")
 end)
-Btn(tGames, "Vidas Hub Universal", "Keyless · local player functions", function()
-    loadHub("https://pastebin.com/raw/1K0n4K7q")
-end)
-Btn(tGames, "CanHub V2", "Keyless · 200+ games", function()
+Btn(tGames, "CanHub V2", "200+ games", function()
     loadHub("https://raw.githubusercontent.com/CanHub/Roblox/main/CanHubV2.lua")
 end)
-Btn(tGames, "XenoHub", "Keyless · 700+ games", function()
+Btn(tGames, "XenoHub", "700+ games", function()
     loadHub("https://raw.githubusercontent.com/sskintbgs/xeno-script/refs/heads/main/main.lua")
 end)
-Btn(tGames, "YARHM", "Keyless · MM2 / Forsaken / Fisch", function()
-    loadHub("https://raw.githubusercontent.com/Joystickplays/psychic-octo-invention/main/source/yarhm/1.21/yarhm.lua", false)
+Btn(tGames, "YARHM", "MM2 / Forsaken / Fisch", function()
+    loadHub("https://raw.githubusercontent.com/Joystickplays/psychic-octo-invention/main/source/yarhm/1.21/yarhm.lua")
 end)
 
 Sec(tGames, "Blox Fruits")
-Btn(tGames, "Moonlight Hub", "Keyless · auto farm / fast attack / V4", function()
+Btn(tGames, "Moonlight Hub", "Auto farm / fast attack / V4", function()
     loadHub("https://raw.githubusercontent.com/Dev-Moonlight/Moonlight/refs/heads/main/Main")
 end)
-Btn(tGames, "Redz Hub (Update 30)", "Keyless · auto bounty / fruit sniper", function()
+Btn(tGames, "Redz Hub (Update 30)", "Auto bounty / fruit sniper", function()
     loadHub("https://raw.githubusercontent.com/bloxfruitsnokey/Redz/refs/heads/main/Redz/update30.luau")
 end)
-Btn(tGames, "Axonic Blox Fruits", "Keyless · Xeno supported", function()
-    loadHub("https://raw.githubusercontent.com/Kenniel123/BloxFruits/refs/heads/main/BloxFruits")
-end)
-Btn(tGames, "Bear Hub", "Keyless · auto farm / fast attack / sea events", function()
+Btn(tGames, "Bear Hub", "Auto farm / sea events", function()
     loadHub("https://raw.githubusercontent.com/Huylovemy/Bearhudz/refs/heads/main/Bearhud.lua")
-end)
-Btn(tGames, "TheScripter + Quantum Onyx", "Keyless · auto sea / ESP / trails", function()
-    loadHub("https://gist.githubusercontent.com/sheshiidriz-netizen/b880b0c514479292c62a95457031709a/raw")
 end)
 
 Sec(tGames, "Murder Mystery 2 (MM2)")
-Btn(tGames, "Axonic MM2", "Keyless · Role ESP / freemium", function()
+Btn(tGames, "Axonic MM2", "Role ESP", function()
     loadHub("https://raw.githubusercontent.com/Kenniel123/Axonic-MM2/refs/heads/main/Axonic%20MM2")
 end)
-Btn(tGames, "AvoEz Hub", "Keyless · new MM2 script", function()
-    loadHub("https://raw.githubusercontent.com/y7ktn49dwr-spec/mm22/refs/heads/main/AvoEzHub")
-end)
-Btn(tGames, "Forge Hub", "Keyless · Kill All, ESP", function()
+Btn(tGames, "Forge Hub", "Kill All, ESP", function()
     loadHub("https://raw.githubusercontent.com/ScriptBLOXmm2/ForgeHubWaguri/refs/heads/main/keyless")
 end)
-Btn(tGames, "RBLXHub MM2", "Keyless · Kill Aura, Auto Shoot", function()
-    loadHub("https://raw.githubusercontent.com/bugxiefun/roblox-scripts/refs/heads/main/rblxhub_mm2")
-end)
-Btn(tGames, "Role Chams", "Keyless · Murderer and Sheriff ESP", function()
-    loadHub("https://raw.githubusercontent.com/imshrak/rolechams/refs/heads/main/main")
-end)
-Btn(tGames, "klaya21n MM2", "Keyless · ScriptVerse featured", function()
-    loadHub("https://raw.githubusercontent.com/klaya21n/script/refs/heads/main/mm2%20new")
-end)
-Btn(tGames, "FoxName MM2", "Keyless · classic MM2", function()
+Btn(tGames, "FoxName MM2", "Classic MM2", function()
     loadHub("https://raw.githubusercontent.com/xv3gasx/Murder-Mystery-2/refs/heads/main/Release.lua")
 end)
 
 Sec(tGames, "Da Hood")
-Btn(tGames, "DP Hub", "Keyless · Auto Ammo / Tracers / ESP", function()
+Btn(tGames, "DP Hub", "Auto Ammo / Tracers / ESP", function()
     loadHub("https://raw.githubusercontent.com/COOLXPLO/DP-HUB-coolxplo/refs/heads/main/DaHoods.lua")
 end)
-Btn(tGames, "Oxide Hub", "Keyless · visual / teleport / rage", function()
-    loadHub("https://raw.githubusercontent.com/xulfo/Oxide-Loader/main/Main.lua")
-end)
-Btn(tGames, "Swagmode", "Keyless · admin / exploit hub", function()
+Btn(tGames, "Swagmode", "Admin / exploit hub", function()
     loadHub("https://raw.githubusercontent.com/I4MMO/Cracks/refs/heads/main/Swagmode.lua")
-end)
-Btn(tGames, "Hood Customs Silent Aim", "Keyless · undetected with FOV", function()
-    loadHub("https://raw.githubusercontent.com/AustinScripts189/HC/refs/heads/main/main.lua")
 end)
 
 Sec(tGames, "Arsenal")
-Btn(tGames, "Unbound Hub", "Keyless · Aimbot, Kill All, INF Ammo", function()
+Btn(tGames, "Unbound Hub", "Aimbot, Kill All", function()
     loadHub("https://raw.githubusercontent.com/samerop/unbound-hub/main/unbound-hub.lua")
 end)
-Btn(tGames, "Soluna Arsenal", "Keyless · combat features", function()
-    loadHub("https://raw.githubusercontent.com/BaconCheats/Scripts/refs/heads/main/PromptJoin.lua")
-end)
-Btn(tGames, "Luigi Hub", "Keyless · Aimbot & Silent Aim", function()
+Btn(tGames, "Luigi Hub", "Aimbot & Silent Aim", function()
     loadHub("https://raw.githubusercontent.com/Luigi4k85/Arsenal-v5.3/refs/heads/main/Arsenal%20v5.3")
-end)
-Btn(tGames, "CatHook Desync", "Keyless · desync", function()
-    loadHub("https://raw.githubusercontent.com/ZfpsGT1030/Arsenal/refs/heads/main/Desync.lua")
 end)
 
 Sec(tGames, "Jailbreak")
-Btn(tGames, "Veloxide V2", "Keyless · Fast Vehicle, Silent Aim, Arrest Aura", function()
+Btn(tGames, "Veloxide V2", "Silent Aim, Arrest Aura", function()
     loadHub("https://raw.githubusercontent.com/veloxides/Jailbreak/refs/heads/main/VeloxideLoader")
 end)
-Btn(tGames, "Jailbreak V2 (AverageAftermath)", "Keyless · aimbot, ESP, speed", function()
+Btn(tGames, "AverageAftermath", "Aimbot, ESP, speed", function()
     loadHub("https://raw.githubusercontent.com/AverageAftermath/JailbreakFun/refs/heads/main/Main")
-end)
-Btn(tGames, "Auto Rob / Arrest (Austin)", "Keyless · universal farm", function()
-    loadHub("https://raw.githubusercontent.com/AustinScripts189/jb/refs/heads/main/rob.lua")
 end)
 
 Sec(tGames, "RIVALS")
-Btn(tGames, "KORAX RIVALS", "Keyless · Silent Aim & ESP", function()
+Btn(tGames, "KORAX RIVALS", "Silent Aim & ESP", function()
     loadHub("https://raw.githubusercontent.com/imshrak/rivals/refs/heads/main/main")
 end)
-Btn(tGames, "JN HH RIVALS", "Keyless · Skin Changer / ESP / Charms", function()
-    loadHub("https://raw.githubusercontent.com/JNHHGaming/Rivals8/refs/heads/main/JN%20HH%20Gaming", true)
-end)
-Btn(tGames, "EvolveX RIVALS", "Keyless · Aimbot, ESP, Triggerbot", function()
+Btn(tGames, "EvolveX RIVALS", "Aimbot, ESP, Triggerbot", function()
     loadHub("https://raw.githubusercontent.com/BrandTinsmith/meomjdye/refs/heads/main/EvolveX.lua")
 end)
-Btn(tGames, "Saint Hub RIVALS", "Keyless · ESP, Silent Aim", function()
-    loadHub("https://raw.githubusercontent.com/tokyotokyo-dev/rivals/refs/heads/main/rivalsaimwh.lua", true)
-end)
-Btn(tGames, "Z3US RIVALS", "Keyless · dedicated RIVALS hub", function()
+Btn(tGames, "Z3US RIVALS", "Dedicated RIVALS hub", function()
     loadHub("https://raw.githubusercontent.com/blackowl1231/ZYPHERION/refs/heads/main/main.lua")
 end)
 
 Sec(tGames, "Grow a Garden 2 (GAG2)")
-Btn(tGames, "TheScripter Hub", "Keyless · auto farm", function()
+Btn(tGames, "TheScripter Hub", "Auto farm", function()
     loadHub("https://gist.githubusercontent.com/sheshiidriz-netizen/7f0b503228048741ce05670e897e082d/raw")
 end)
-Btn(tGames, "Dark Spawner", "Keyless · spawn pets/seeds", function()
+Btn(tGames, "Dark Spawner", "Spawn pets/seeds", function()
     loadHub("https://raw.githubusercontent.com/f2playelias-lab/cool/refs/heads/main/GagFreeScript")
 end)
-Btn(tGames, "RBLXScript T.Net", "Keyless · auto harvest/plant", function()
+Btn(tGames, "RBLXScript T.Net", "Auto harvest/plant", function()
     loadHub("https://raw.githubusercontent.com/rblxshop/Rblxscripts/refs/heads/main/gag2new.lua")
-end)
-Btn(tGames, "Gravity Hub", "Keyless · mobile + PC", function()
-    loadHub("https://raw.githubusercontent.com/Dev-gravityHub/GrowAGarden2/refs/heads/main/Main.lua")
 end)
 
 Sec(tGames, "Natural Disaster Survival (NDS)")
-Btn(tGames, "Emote Fling OP", "Keyless · god mode, fling", function()
+Btn(tGames, "Emote Fling OP", "God mode, fling", function()
     loadHub("https://pastebin.com/raw/8XCgheRD")
 end)
-Btn(tGames, "OP Troll GUI", "Keyless · fling + map change", function()
+Btn(tGames, "OP Troll GUI", "Fling + map change", function()
     loadHub("https://pastebin.com/raw/Gk5jFVRK")
 end)
-Btn(tGames, "Object Control & Flight", "Keyless · manipulate parts + fly", function()
+Btn(tGames, "Object Control & Flight", "Manipulate parts + fly", function()
     loadHub("https://raw.githubusercontent.com/CREEP-fmg/MAINSCRIPTS/refs/heads/main/MANIPULATORNOKEY.TXT")
-end)
-Btn(tGames, "Touch Fling", "Keyless · fling by touching", function()
-    loadHub("https://raw.githubusercontent.com/SCRIPTHUB-dev-god/exploit/refs/heads/main/fling/the-touch-fling.luau", true)
-end)
-Btn(tGames, "NDS Script 1.1", "Keyless · lightweight survival", function()
-    loadHub("https://pastebin.com/raw/xYZXg53h", true)
 end)
 
 Sec(tGames, "Battlegrounds / FPS / Action")
-Btn(tGames, "Phantom Forces (Legit)", "Keyless · silent aim + ESP", function()
+Btn(tGames, "Phantom Forces (Legit)", "Silent aim + ESP", function()
     loadHub("https://raw.githubusercontent.com/jsdhaijs/autofatrm/refs/heads/main/pfmain", true)
 end)
-Btn(tGames, "Phantom Forces (AimReaper)", "Keyless · aimbot + ESP", function()
+Btn(tGames, "Phantom Forces (AimReaper)", "Aimbot + ESP", function()
     loadHub("https://rawscripts.net/raw/Phantom-Forces-AimReaper-Keyless-Phantom-forces-OP-Aimbot-37523")
 end)
-Btn(tGames, "Defusal", "Keyless · Aimbot, ESP, Gun Mods", function()
-    loadHub("https://raw.githubusercontent.com/TCOAAL/Defusal/refs/heads/main/FPS")
-end)
-Btn(tGames, "Valinc Syndicate", "Keyless · FE features", function()
-    loadHub("https://raw.githubusercontent.com/wildhornets/defeat-valinc/refs/heads/master/vd/play.lua")
-end)
-Btn(tGames, "Bad Business", "Keyless · aimbot, ESP, unlock all", function()
+Btn(tGames, "Bad Business", "Aimbot, ESP, unlock all", function()
     loadHub("https://raw.githubusercontent.com/SP-Hub/Bad-Business/main/SPHub")
 end)
-Btn(tGames, "Criminality", "Keyless · silent aim, ESP, farm", function()
-    loadHub("https://raw.githubusercontent.com/SP-Hub/Criminality/main/SPHub")
-end)
-Btn(tGames, "Combat Warriors", "Keyless · kill aura, auto parry", function()
+Btn(tGames, "Combat Warriors", "Kill aura, auto parry", function()
     loadHub("https://raw.githubusercontent.com/decryp1/Combat-Warriors-script/refs/heads/main/HerkleHubSolara%26Xeno")
-end)
-Btn(tGames, "Apocalypse Rising 2", "Keyless · ESP, silent aim", function()
-    loadHub("https://raw.githubusercontent.com/SP-Hub/Apocalypse-Rising-2/main/SPHub")
 end)
 
 Sec(tGames, "Ride a Pet")
-Btn(tGames, "Egg ESP + Teleport", "Keyless · open source · distance labels", function()
+Btn(tGames, "Egg ESP + Teleport", "Distance labels", function()
     loadHub("https://raw.githubusercontent.com/darkduy/lua/refs/heads/main/ride-a-pet.lua")
 end)
-Btn(tGames, "XyronHub", "Keyless · auto farm, auto luck, ESP", function()
+Btn(tGames, "XyronHub", "Auto farm, auto luck", function()
     loadHub("https://raw.githubusercontent.com/vikrantsudo/XyronHub/refs/heads/main/RideAPet")
-end)
-Btn(tGames, "Crystal Hub", "Keyless · auto steal best egg, auto hatch", function()
-    loadHub("https://raw.githubusercontent.com/scriptmm2/Ride-A-Pet/refs/heads/main/luau")
-end)
-Btn(tGames, "ARC Hub", "Keyless · auto farm, hatch, rebirth", function()
-    loadHub("https://pastefy.app/GQ8Mr9MM/raw")
 end)
 
 Sec(tGames, "MONOCHROME (Horror)")
-Btn(tGames, "ESP + Key Grabber", "Keyless · ESP everything, code decipher", function()
+Btn(tGames, "ESP + Key Grabber", "ESP everything", function()
     loadHub("https://raw.githubusercontent.com/Sledny/Im-up-to-no-good/refs/heads/main/monochrome_game.lua")
 end)
-Btn(tGames, "Auto Complete + Keys", "Keyless · ESP, get all keys, input code", function()
-    loadHub("https://raw.githubusercontent.com/EvolWareOfc/EvolWare/refs/heads/main/Games/Loader.lua")
-end)
-Btn(tGames, "Auto Solve + Fullbright", "Keyless · auto solve, ESP, fullbright", function()
+Btn(tGames, "Auto Solve + Fullbright", "Auto solve, ESP", function()
     loadHub("https://raw.githubusercontent.com/Bac0nHck/Scripts/refs/heads/main/MONOCHROME.lua")
 end)
 
 Sec(tGames, "Jujutsu Shenanigans (JJS)")
-Btn(tGames, "Jujutsuer V2", "Keyless · kill aura, auto black flash", function()
+Btn(tGames, "Jujutsuer V2", "Kill aura, auto black flash", function()
     loadHub("https://raw.githubusercontent.com/tricksyfishys/jujutsuer/refs/heads/main/main.lua")
 end)
-Btn(tGames, "Namelesss Hub", "Keyless · lock on, animation spoof, flight", function()
+Btn(tGames, "Namelesss Hub", "Lock on, animation spoof", function()
     loadHub("https://raw.githubusercontent.com/NeziaReal/jjs/refs/heads/main/main.lua")
-end)
-Btn(tGames, "Kill All Gojo 0.2", "Keyless · instant elimination, auto attack", function()
-    loadHub("https://pastebin.com/raw/F3MX83hV", true)
-end)
-Btn(tGames, "Minosr", "Keyless · stretches reach, reverse red", function()
-    loadHub("https://raw.githubusercontent.com/Dragonfly5101/Minosr/refs/heads/main/obfuscated.lua")
 end)
 
 Sec(tGames, "More Horror")
-Btn(tGames, "FEAR", "Keyless · universal FE Kill GUI", function()
+Btn(tGames, "FEAR", "Universal FE Kill GUI", function()
     loadHub("https://raw.githubusercontent.com/SP-Hub/FE-Kill/main/SPHub")
 end)
-Btn(tGames, "Pressure", "Keyless · auto quirk, ESP, kill aura", function()
+Btn(tGames, "Pressure", "Auto quirk, ESP, kill aura", function()
     loadHub("https://raw.githubusercontent.com/DrakeCongressman/Kraken-Update-KAIZEN/main/Kraken-Update-KAIZEN.lua")
 end)
-Btn(tGames, "3008 (Localplayer)", "Keyless · bring items, god mode", function()
+Btn(tGames, "3008 (Localplayer)", "Bring items, god mode", function()
     loadHub("https://raw.githubusercontent.com/saninarchawee-prog/Scp-3008/refs/heads/main/lua")
 end)
-Btn(tGames, "Specter", "Keyless · ESP, auto win", function()
+Btn(tGames, "Specter", "ESP, auto win", function()
     loadHub("https://raw.githubusercontent.com/SP-Hub/Specter/main/SPHub")
 end)
-Btn(tGames, "Evade", "Keyless · auto dodge, ESP", function()
-    loadHub("https://raw.githubusercontent.com/SP-Hub/Evade/main/SPHub")
-end)
-Btn(tGames, "Apeirophobia", "Keyless · auto win, ESP", function()
-    loadHub("https://raw.githubusercontent.com/SP-Hub/Apeirophobia/main/SPHub")
-end)
-Btn(tGames, "Cheese Escape", "Keyless · simple horror", function()
+Btn(tGames, "Cheese Escape", "Simple horror", function()
     loadHub("https://rscripts.net/raw/cheese-escape-horror-keyless_1763313774636_TNRiKy9YZF.txt")
-end)
-Btn(tGames, "Amber Alert", "Keyless · auto farm, speed hack", function()
-    loadHub("https://gist.githubusercontent.com/BlockyCoder/7cbb90bf3511e2daa8ea259c8f91af33/raw/687c269796584d890d21fe14136a06518a9b0b2b/Amber%2520Alert%2520%255BUPD%255D%2520%255BHORROR%255D")
 end)
 
 Sec(tGames, "Runaways")
-Btn(tGames, "Auto Farm + Kill Aura", "Keyless · silent aim, loot ESP, god mode", function()
+Btn(tGames, "Auto Farm + Kill Aura", "Silent aim, loot ESP", function()
     loadHub("https://raw.githubusercontent.com/Bac0nHck/Scripts/refs/heads/main/RUNAWAYS.lua")
 end)
-Btn(tGames, "Ouroboros", "Keyless · auto pawn, auto escape, loot ESP", function()
+Btn(tGames, "Ouroboros", "Auto pawn, auto escape", function()
     loadHub("https://raw.githubusercontent.com/joustingmatch/Ouroboros/main/loader.lua")
-end)
-Btn(tGames, "StarCrow Hub", "Keyless · auto win, break safes, vehicle fly", function()
-    loadHub("https://raw.githubusercontent.com/NoahTyrant/StarCrow/refs/heads/main/Runaways")
 end)
 
 Sec(tGames, "World // Zero")
-Btn(tGames, "Auto Farm (NukeVsCity)", "Keyless · largest free version", function()
+Btn(tGames, "Auto Farm (NukeVsCity)", "Largest free version", function()
     loadHub("https://raw.githubusercontent.com/NukeVsCity/Scripts2025/refs/heads/main/worldzerofarm")
-end)
-Btn(tGames, "Anya Hub", "Keyless · protected but clean", function()
-    loadHub("https://raw.githubusercontent.com/zakbari045-cmyk/anyahub/refs/heads/main/wz")
 end)
 
 Sec(tGames, "Steal a Brainrot")
-Btn(tGames, "Evil Hub Duels", "Keyless · steal speed / aimbot / anti-fling", function()
+Btn(tGames, "Evil Hub Duels", "Steal speed / aimbot / anti-fling", function()
     loadHub("https://pastefy.app/V0blGtti/raw")
 end)
-Btn(tGames, "K2 Duels", "Keyless · working keyless duels", function()
+Btn(tGames, "K2 Duels", "Working keyless duels", function()
     loadHub("https://xenoscripts.com/script/k2-duels-steal-a-brainrot-script-working-and-keyless")
 end)
-Btn(tGames, "KURD HUB", "Keyless · mobile friendly, good steal", function()
+Btn(tGames, "KURD HUB", "Mobile friendly", function()
     loadHub("https://raw.githubusercontent.com/dontasklol/Stealabrainrot/refs/heads/main/Kurd%20hub")
-end)
-Btn(tGames, "Dark Hub SAB", "Keyless · infinite jump, anti stun", function()
-    loadHub("https://raw.githubusercontent.com/Jayjayart/Sabscriptdarkhub.lua/refs/heads/main/darkhubstealabrainrotscript.lua")
-end)
-Btn(tGames, "SAB PIE Loader V2", "Keyless · duel, map helper, automation", function()
-    loadHub("https://raw.githubusercontent.com/UniversalScriptHub/SABLOADERV3/refs/heads/main/PIETeamloaderscript.Lua")
 end)
 
 Sec(tGames, "Forsaken")
-Btn(tGames, "Forsaken Plus", "Keyless · invincible / autogen / ESP", function()
+Btn(tGames, "Forsaken Plus", "Invincible / autogen / ESP", function()
     loadHub("https://naikoexploit.vercel.app/ForsakenPlus")
 end)
-Btn(tGames, "Cursedsaken", "Keyless · aimbot + speed", function()
-    loadHub("https://raw.githubusercontent.com/zxcursedsocute/Forsaken-Script/refs/heads/main/lua")
-end)
-Btn(tGames, "RINGTA HUB", "Keyless · dedicated Forsaken", function()
+Btn(tGames, "RINGTA HUB", "Dedicated Forsaken", function()
     loadHub("https://raw.githubusercontent.com/34f3f/forsaken.github.io/refs/heads/main/ringtabublik.lua")
-end)
-Btn(tGames, "Auto Block", "Keyless · infinite stamina", function()
-    loadHub("https://raw.githubusercontent.com/LolnotaKid/project/refs/heads/main/AutoBLOCKKKWAHV1")
-end)
-Btn(tGames, "Nolsaken", "Keyless · alternative hub", function()
-    loadHub("https://raw.githubusercontent.com/Potato5466794/Nolsaken/refs/heads/main/NOL/Nolsaken.luau")
 end)
 
 Sec(tGames, "Blue Lock Rivals")
-Btn(tGames, "Auto Get Ball / Steal", "Keyless · auto dribble + goals", function()
+Btn(tGames, "Auto Get Ball / Steal", "Auto dribble + goals", function()
     loadHub("https://raw.githubusercontent.com/TheDarkoneMarcillisePex/Other-Scripts/refs/heads/main/Blue%20Lock%20Rivals%20GUI")
 end)
-Btn(tGames, "Nova Hub", "Keyless · shot changer + free cosmetics", function()
+Btn(tGames, "Nova Hub", "Shot changer + cosmetics", function()
     loadHub("https://raw.githubusercontent.com/Dreamyzone/Nova-Hub-Blue-Lock-Rivals/refs/heads/main/Shot-Modifier-FREE-COSMETICS-WORKS-WITH-ALL-STYLES-Op")
-end)
-Btn(tGames, "Hiori Awakening", "Keyless · infinite awakening + styles", function()
-    loadHub("https://pastefy.app/ObKHeapN/raw")
-end)
-Btn(tGames, "Flying Ball", "Keyless · steer the ball in the air", function()
-    loadHub("https://raw.githubusercontent.com/Iliankytb/Iliankytb/main/BLRFlyingBall")
 end)
 
 Sec(tGames, "99 Nights in the Forest")
-Btn(tGames, "Ringta Hub", "Keyless · kill aura / auto craft", function()
+Btn(tGames, "Ringta Hub", "Kill aura / auto craft", function()
     loadHub("https://raw.githubusercontent.com/wehibuy/ringta/main/ringta.lua")
 end)
-Btn(tGames, "ToastyXD Hub", "Keyless · auto attack + instant reload", function()
+Btn(tGames, "ToastyXD Hub", "Auto attack + instant reload", function()
     loadHub("https://raw.githubusercontent.com/nouralddin-abdullah/99-night/refs/heads/main/main-en.lua")
-end)
-Btn(tGames, "Fast Hub", "Keyless · player ESP + food ESP", function()
-    loadHub("https://xenoscripts.com/script/fast-hub-script-99-nights-player-esp-food-esp-chair")
-end)
-Btn(tGames, "Bliqe Auto Farm", "Keyless · auto farm", function()
-    loadHub("https://raw.githubusercontent.com/Bliqe/Upload/refs/heads/main/Games/RAR/47425677550.lua")
 end)
 
 Sec(tGames, "Dead Rails")
-Btn(tGames, "Ringta Dead Rails", "Keyless · auto farm / bring items", function()
+Btn(tGames, "Ringta Dead Rails", "Auto farm / bring items", function()
     loadHub("https://raw.githubusercontent.com/erewe23/deadrailsring.github.io/refs/heads/main/ringta.lua")
 end)
-Btn(tGames, "CashRails", "Keyless · auto bond farm", function()
+Btn(tGames, "CashRails", "Auto bond farm", function()
     loadHub("https://raw.githubusercontent.com/cashaura/DeadRails/refs/heads/main/cashrails.lua")
-end)
-Btn(tGames, "QIWIK Hub", "Keyless · melee aura, gun aura, air weld", function()
-    loadHub("https://raw.githubusercontent.com/Qiwikox12/stubrawl/refs/heads/main/DeadRails.txt")
-end)
-Btn(tGames, "Vexon Hub", "Keyless · freeze mobs, instakill", function()
-    loadHub("https://xenoscripts.com/script/vexon-hub-script-freeze-mobs-instakill-mobs-transparent-buildings")
 end)
 
 Sec(tGames, "Fisch")
-Btn(tGames, "MUR4 Keyless", "Keyless · auto reel / cast / shake", function()
+Btn(tGames, "MUR4 Keyless", "Auto reel / cast / shake", function()
     loadHub("https://raw.githubusercontent.com/SP-Hub/Fisch/main/SPHub")
 end)
-Btn(tGames, "Instant Auto Fish", "Keyless · auto sell OP", function()
+Btn(tGames, "Instant Auto Fish", "Auto sell OP", function()
     loadHub("https://xenoscripts.com/script/instant-auto-fish-auto-sell-op-keyless-fisch-script")
 end)
 
 Sec(tGames, "Other Popular")
-Btn(tGames, "Prison Life", "Keyless · kill all, gun mods", function()
+Btn(tGames, "Prison Life", "Kill all, gun mods", function()
     loadHub("https://raw.githubusercontent.com/SP-Hub/Prison-Life/main/SPHub")
 end)
-Btn(tGames, "Tower of Hell", "Keyless · skip stages, fly", function()
+Btn(tGames, "Tower of Hell", "Skip stages, fly", function()
     loadHub("https://raw.githubusercontent.com/SP-Hub/TOH/main/SPHub")
 end)
-Btn(tGames, "Bedwars", "Keyless · kill all, auto win", function()
+Btn(tGames, "Bedwars", "Kill all, auto win", function()
     loadHub("https://raw.githubusercontent.com/SP-Hub/Bedwars/main/SPHub")
 end)
-Btn(tGames, "Doors", "Keyless · ESP, auto win", function()
+Btn(tGames, "Doors", "ESP, auto win", function()
     loadHub("https://raw.githubusercontent.com/SP-Hub/Doors/main/SPHub")
 end)
-Btn(tGames, "Blade Ball (SP-Hub)", "Keyless · auto parry", function()
-    loadHub("https://raw.githubusercontent.com/SP-Hub/Blade-Ball/main/SPHub")
-end)
-Btn(tGames, "Blade Ball (Soluna Hub)", "Keyless · auto parry + prediction", function()
+Btn(tGames, "Blade Ball (Soluna)", "Auto parry + prediction", function()
     loadHub("https://xenoscripts.com/script/soluna-hub-script-auto-parry-prediction-system-max-parry-angle")
 end)
-Btn(tGames, "Blade Ball (Bobit)", "Keyless · auto parry + auto spam", function()
+Btn(tGames, "Blade Ball (Bobit)", "Auto parry + auto spam", function()
     loadHub("https://bypass.tools/tr/scripts/rscripts/bobit-autoparry-keyless-auto-spam-auto-ability-upd-blade-ball-script")
 end)
 
 -- ═══ COMBAT ═══
 Sec(tCombat, "Aimbot / ESP")
-Btn(tCombat, "Sp3arParvus", "Keyless · aim-lock + ESP, open source", function()
+Btn(tCombat, "Sp3arParvus", "Aim-lock + ESP", function()
     loadHub("https://raw.githubusercontent.com/JakeHukari/Sp3arParvus/refs/heads/main/Sp3arParvus.lua", true)
 end)
-Btn(tCombat, "VibeCode V2", "Keyless · silent aim + trigger bot", function()
+Btn(tCombat, "VibeCode V2", "Silent aim + trigger bot", function()
     loadHub("https://raw.githubusercontent.com/g8553037-lgtm/VibeCodeV2/refs/heads/main/vibecode.lua")
 end)
-Btn(tCombat, "Universal ESP (ayzz7)", "Keyless · box / chams / health", function()
+Btn(tCombat, "Universal ESP (ayzz7)", "Box / chams / health", function()
     loadHub("https://pastefy.app/VKpXX0pO/raw")
 end)
 
 -- ═══ CHAT ═══
 local function SendChat(msg)
     if not msg or msg == "" then return end
-    local sent = pcall(function()
+    pcall(function()
         local ch = TextChatService:FindFirstChild("TextChannels")
         if ch then
             local g = ch:FindFirstChild("RBXGeneral")
-            if g then g:SendAsync(msg) return true end
-        end
-        return false
-    end)
-    if sent then return end
-    pcall(function()
-        local evt = ReplicatedStorage:FindFirstChild("DefaultChatSystemChatEvents")
-        if evt then
-            local r = evt:FindFirstChild("SayMessageRequest")
-            if r then r:FireServer(msg, "All") end
+            if g then g:SendAsync(msg) end
         end
     end)
 end
-
 Sec(tChat, "Exploiter Chat")
 Btn(tChat, "Enable /bolt prefix", "Type /bolt <msg>", function()
     if genv.BoltExploitChat then return end
     genv.BoltExploitChat = LP.Chatted:Connect(function(msg)
         if msg:sub(1, 6):lower() == "/bolt " then SendChat("[BOLT] " .. msg:sub(7)) end
     end)
-    notify("BOLT", "Exploiter chat on")
 end)
 Inp(tChat, "Custom Chat", "Prefixes [BOLT]", "type message...", function(msg)
     if msg ~= "" then SendChat("[BOLT] " .. msg) end
 end)
 
--- ═══ BYPASS AC (auto-active) ═══
-Sec(tBypass, "Status — All Active")
-C("Frame", {
-    Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y,
-    BackgroundTransparency = 1, Parent = Sc,
-}).LayoutOrder = 0
-local function StatusRow(tab, label, state)
-    local b = C("Frame", {
-        Size = UDim2.new(1, 0, 0, 32), BackgroundColor3 = CARD,
-        BorderSizePixel = 0, Parent = Sc
-    })
-    b:SetAttribute("Tab", tab)
-    Cor(b, 5)
-    local dot = C("Frame", {
-        Size = UDim2.new(0, 6, 0, 6), Position = UDim2.new(0, 14, 0.5, -3),
-        BackgroundColor3 = GREEN, BorderSizePixel = 0, Parent = b
-    })
-    Cor(dot, 3)
-    C("TextLabel", {
-        Name = "Title", Size = UDim2.new(1, -30, 1, 0), Position = UDim2.new(0, 26, 0, 0),
-        BackgroundTransparency = 1, Text = label,
-        TextColor3 = TX, TextSize = 11, Font = Enum.Font.GothamMedium,
-        TextXAlignment = Enum.TextXAlignment.Left, Parent = b
-    })
-    b.Visible = (tab == Active)
-end
-StatusRow(tBypass, "Universal Shield — active", true)
-StatusRow(tBypass, "Delta Clamp (45 studs/frame) — active", true)
-StatusRow(tBypass, "Remote Guard — active", true)
-
-Btn(tBypass, "Reinstall All Protections", "Shield + Clamp + Guard — one click", function()
+-- ═══ BYPASS AC ═══
+Sec(tBypass, "Shield Layer")
+Btn(tBypass, "Reinstall All Protections", "Shield + Clamp + Guard", function()
     installUniversalShield()
     installDeltaClamp(45)
     installRemoteGuard()
-    notify("BYPASS", "All protections reinstalled")
 end)
-
 Sec(tBypass, "Key Bypass")
 Tog(tBypass, "Key Environment Active", "Pre-sets key globals + files", function(on)
     KeyBypass.enabled = on
     if on then setupKeyEnvironment() end
-    notify("KEY", on and "Key environment active" or "Key environment disabled")
-end)
-Btn(tBypass, "Re-inject Key Globals", "Force re-set all keys", function()
-    setupKeyEnvironment(); notify("KEY", "Key globals re-injected")
-end)
-
+end, true)
 Sec(tBypass, "Lagback")
 Tog(tBypass, "Stop Lagback", "Snap-back position protection", function(on)
     if genv.BoltLagback then pcall(function() genv.BoltLagback:Disconnect() end) genv.BoltLagback = nil end
@@ -2325,49 +1918,35 @@ Tog(tBypass, "Stop Lagback", "Snap-back position protection", function(on)
             else genv.BoltLastCF = hrp.CFrame end
         else genv.BoltLastCF = hrp.CFrame end
     end)
-    notify("BOLT", "Lagback protection on")
 end)
 
 -- ═══ SETTINGS ═══
-Sec(tSettings, "Network (Auto)")
-Tog(tSettings, "Auto Network Ownership", "Claims unanchored parts automatically", function(on)
+Sec(tSettings, "Performance")
+Tog(tSettings, "Auto Network Ownership", "Claim nearby parts (200 studs)", function(on)
     if on then enableAutoNetwork() else disableAutoNetwork() end
-end)
-Btn(tSettings, "Force Sweep Now", "Claim all unanchored parts this instant", sweepWorkspace)
-Btn(tSettings, "Release All Ownership", "Hand everything back to the server", function()
-    for _, obj in ipairs(workspace:GetDescendants()) do
-        if obj:IsA("BasePart") and not obj.Anchored then
-            pcall(function() obj:SetNetworkOwner(nil) end)
-        end
-    end
-    notify("NET", "All parts released to server")
-end)
-
-Sec(tSettings, "Scanner")
-Btn(tSettings, "Re-run Capability Scan", "Print pruned features", function()
-    PRUNED = {}; scanCapabilities(); reportPruned()
-    notify("BOLT", "Capability scan complete")
-end)
+end, true)
+Tog(tSettings, "Remote Guard", "Sanitize remote args", function(on)
+    if on then installRemoteGuard() end
+end, true)
+Tog(tSettings, "Universal Shield", "Block Kick/Ban/Destroy", function(on)
+    if on then installUniversalShield() end
+end, true)
 Btn(tSettings, "Show Pruned Count", "How many features were removed", function()
     notify("BOLT", #PRUNED .. " features pruned")
 end)
-
 Sec(tSettings, "Reset")
-Btn(tSettings, "Stop All Loops", "Kill Fly, Noclip, Spin, etc.", function()
-    Cleanup()
-end)
+Btn(tSettings, "Stop All Loops", "Kill Fly, Noclip, Spin, etc.", function() Cleanup() end)
 Btn(tSettings, "Unload Hub", "Close UI completely", function() Cleanup() end)
 
 -- ══════════════════════════════════════════════
---   INIT (launch notifications silenced)
+--   INIT
 -- ══════════════════════════════════════════════
 SelTab(tMain)
 renderScanner()
 
 registerFeature("Detection Hooks", { "getrawmetatable" }, installDetectionHooks)
-registerFeature("Marketplace Hooks", { "getrawmetatable" }, installMarketplaceHooks)
+-- Note: Marketplace Hooks not installed at init — only on Global Fake toggle
 
--- AUTO-BYPASS: fire silently on load, no questions asked
 task.defer(function()
     pcall(installUniversalShield)
     pcall(installDeltaClamp, 45)
@@ -2384,4 +1963,3 @@ UIS.InputBegan:Connect(function(input, gp)
 end)
 
 reportPruned()
--- Launch notifications removed — no "Bolt Hub loaded" popup
