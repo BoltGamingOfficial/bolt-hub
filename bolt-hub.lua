@@ -1,5 +1,5 @@
 --[[
-    ⚡ BOLT HUB — THE ULTIMATE ROBLOX HUB⚡
+    ⚡ BOLT HUB — THE ULTIMATE ROBLOX HUB ⚡
 ]]
 
 -- ─── Services ───
@@ -16,7 +16,7 @@ local VirtualUser        = game:GetService("VirtualUser")
 local VirtualInput       = game:GetService("VirtualInputManager")
 local MarketplaceService = game:GetService("MarketplaceService")
 
--- ─── Safe LP + Camera (fixes nil race at load) ───
+-- ─── Safe LP + Camera ───
 local LP = Players.LocalPlayer or Players:WaitForChild("Player", 5)
 if not LP then
     repeat task.wait(0.1) until Players.LocalPlayer
@@ -36,15 +36,14 @@ local unpack        = table.unpack or unpack
 local identify      = identifyexecutor or function() return "Unknown" end
 
 -- ══════════════════════════════════════════════
---   FULL RE-EXEC WIPE (with pcall safety)
+--   FULL RE-EXEC WIPE
 -- ══════════════════════════════════════════════
 local function wipeOld()
-    if genv.BoltNetTimer then pcall(function() task.cancel(genv.BoltNetTimer) end) genv.BoltNetTimer = nil end
     for _, k in ipairs({
-        "BoltNetAdd", "BoltDeltaClamp", "BoltFly", "BoltNoclip", "BoltSpin",
+        "BoltDeltaClamp", "BoltFly", "BoltNoclip", "BoltSpin",
         "BoltSpinAll", "BoltFullbright", "BoltLagback", "BoltAntiAfk", "BoltGod",
         "BoltRegen", "BoltFollow", "BoltInfJump", "BoltClick", "BoltExploitChat",
-        "BoltCharAdded", "BoltGfxStore",
+        "BoltGfxStore",
     }) do
         local v = genv[k]
         if v and type(v) == "userdata" then
@@ -59,7 +58,6 @@ local function wipeOld()
     genv.BoltFlingAll = false
     genv.BoltAutoClick = false
     genv.BoltGlobalFake = false
-    genv.BoltAutoNet = false
 end
 pcall(wipeOld)
 
@@ -208,6 +206,47 @@ local function SafeNO(part)
 end
 
 -- ══════════════════════════════════════════════
+--   NETWORK OWNERSHIP (manual only)
+-- ══════════════════════════════════════════════
+local function claimAllParts()
+    local n = 0
+    for _, obj in ipairs(workspace:GetDescendants()) do
+        if obj:IsA("BasePart") and not obj.Anchored then
+            local ok = pcall(function() obj:SetNetworkOwner(LP) end)
+            if ok then n = n + 1 end
+        end
+    end
+    notify("NET", "Claimed " .. n .. " parts")
+    return n
+end
+
+local function claimNearbyParts(radius)
+    local hrp = GetHRP(); if not hrp then notify("NET", "No character"); return 0 end
+    local parts = workspace:GetPartBoundsInRadius(hrp.Position, radius or 200)
+    local n = 0
+    for _, part in ipairs(parts) do
+        if not part.Anchored then
+            local ok = pcall(function() part:SetNetworkOwner(LP) end)
+            if ok then n = n + 1 end
+        end
+    end
+    notify("NET", "Claimed " .. n .. " nearby parts")
+    return n
+end
+
+local function releaseAllParts()
+    local n = 0
+    for _, obj in ipairs(workspace:GetDescendants()) do
+        if obj:IsA("BasePart") and not obj.Anchored then
+            local ok = pcall(function() obj:SetNetworkOwner(nil) end)
+            if ok then n = n + 1 end
+        end
+    end
+    notify("NET", "Released " .. n .. " parts to server")
+    return n
+end
+
+-- ══════════════════════════════════════════════
 --   FORCE STATS
 -- ══════════════════════════════════════════════
 local ForceStats = { enabled = false, walkSpeed = 100, jumpPower = 100, hipHeight = 2, conn = nil }
@@ -227,74 +266,6 @@ end
 local function stopForceStats()
     ForceStats.enabled = false
     if ForceStats.conn then ForceStats.conn:Disconnect(); ForceStats.conn = nil end
-end
-
--- ══════════════════════════════════════════════
---   AUTO NETWORK OWNERSHIP (optimized)
--- ══════════════════════════════════════════════
-local AutoNet = { enabled = true, claimedCount = 0 }
-local AUTO_RADIUS = 200
-
-local function getHRPPos()
-    local hrp = GetHRP()
-    return hrp and hrp.Position
-end
-
-local function installAutoNetwork()
-    if genv.BoltAutoNet then return end
-    genv.BoltAutoNet = true
-
-    -- Fast initial sweep using native spatial query
-    task.defer(function()
-        local pos = getHRPPos()
-        if not pos then return end
-        local parts = workspace:GetPartBoundsInRadius(pos, AUTO_RADIUS)
-        for _, part in ipairs(parts) do
-            if not part.Anchored then
-                pcall(function() part:SetNetworkOwner(LP) end)
-                AutoNet.claimedCount = AutoNet.claimedCount + 1
-            end
-        end
-    end)
-
-    -- Claim newly spawned parts in radius
-    genv.BoltNetAdd = workspace.DescendantAdded:Connect(function(obj)
-        if not obj:IsA("BasePart") or obj.Anchored then return end
-        local pos = getHRPPos()
-        if pos and (obj.Position - pos).Magnitude < AUTO_RADIUS then
-            pcall(function() obj:SetNetworkOwner(LP) end)
-            AutoNet.claimedCount = AutoNet.claimedCount + 1
-        end
-    end)
-
-    -- Own character on respawn (nil-safe)
-    genv.BoltCharAdded = LP.CharacterAdded:Connect(function(char)
-        task.wait(0.5)
-        if not char or not char.Parent then return end
-        for _, d in ipairs(char:GetDescendants()) do
-            if d:IsA("BasePart") and not d.Anchored then
-                pcall(function() d:SetNetworkOwner(LP) end)
-            end
-        end
-    end)
-end
-
-local function disableAutoNetwork()
-    AutoNet.enabled = false
-    if genv.BoltNetAdd then pcall(function() genv.BoltNetAdd:Disconnect() end) genv.BoltNetAdd = nil end
-    if genv.BoltCharAdded then pcall(function() genv.BoltCharAdded:Disconnect() end) genv.BoltCharAdded = nil end
-    genv.BoltAutoNet = false
-    for _, obj in ipairs(workspace:GetDescendants()) do
-        if obj:IsA("BasePart") and not obj.Anchored then
-            pcall(function() obj:SetNetworkOwner(nil) end)
-        end
-    end
-end
-
-local function enableAutoNetwork()
-    AutoNet.enabled = true
-    AutoNet.claimedCount = 0
-    installAutoNetwork()
 end
 
 -- ══════════════════════════════════════════════
@@ -857,7 +828,7 @@ Cor(LogoTile, 5); drawBolt(LogoTile, 20)
 
 C("TextLabel", {
     Size = UDim2.new(0, 200, 1, 0), Position = UDim2.new(0, 42, 0, 0),
-    BackgroundTransparency = 1, Text = "Bolt Hub v7.6",
+    BackgroundTransparency = 1, Text = "Bolt Hub",
     TextColor3 = TX, TextSize = 13, Font = Enum.Font.GothamMedium,
     TextXAlignment = Enum.TextXAlignment.Left, Parent = Top
 })
@@ -952,7 +923,6 @@ local function Cleanup()
             "BoltFly", "BoltNoclip", "BoltSpin", "BoltSpinAll", "BoltFullbright",
             "BoltLagback", "BoltAntiAfk", "BoltGod", "BoltRegen", "BoltFollow",
             "BoltInfJump", "BoltDeltaClamp", "BoltClick", "BoltExploitChat",
-            "BoltCharAdded", "BoltNetAdd",
         }) do
             local v = genv[k]
             if v and type(v) == "userdata" then
@@ -965,7 +935,6 @@ local function Cleanup()
         genv.BoltFlingAll = false; genv.BoltAutoClick = false
         if ForceStats.conn then pcall(function() ForceStats.conn:Disconnect() end) ForceStats.conn = nil end
         ForceStats.enabled = false
-        pcall(disableAutoNetwork)
     end)
 end
 
@@ -1415,6 +1384,7 @@ local tGames    = Tab("Games",      "🎮")
 local tCombat   = Tab("Combat",     "🎯")
 local tChat     = Tab("Chat",       "💬")
 local tBypass   = Tab("Bypass AC",  "🔓")
+local tNetwork  = Tab("Network",    "🌐")
 local tSettings = Tab("Settings",   "⚙")
 
 -- ═══ DISCORDS ═══
@@ -1925,17 +1895,31 @@ Tog(tBypass, "Stop Lagback", "Snap-back position protection", function(on)
     end)
 end)
 
+-- ═══ NETWORK ═══
+Sec(tNetwork, "Claim")
+Btn(tNetwork, "Claim All Parts", "Full workspace sweep", function()
+    claimAllParts()
+end)
+Btn(tNetwork, "Claim Nearby (200 studs)", "Fast native spatial query", function()
+    claimNearbyParts(200)
+end)
+Btn(tNetwork, "Claim Nearby (500 studs)", "Wider radius", function()
+    claimNearbyParts(500)
+end)
+Sec(tNetwork, "Release")
+Btn(tNetwork, "Release All Parts", "Hand ownership back to server", function()
+    releaseAllParts()
+end)
+
 -- ═══ SETTINGS ═══
-Sec(tSettings, "Performance")
-Tog(tSettings, "Auto Network Ownership", "Claim nearby parts (200 studs)", function(on)
-    if on then enableAutoNetwork() else disableAutoNetwork() end
-end, true)
+Sec(tSettings, "Protection")
 Tog(tSettings, "Remote Guard", "Sanitize remote args", function(on)
     if on then installRemoteGuard() end
 end, true)
 Tog(tSettings, "Universal Shield", "Block Kick/Ban/Destroy", function(on)
     if on then installUniversalShield() end
 end, true)
+Sec(tSettings, "Diagnostics")
 Btn(tSettings, "Show Pruned Count", "How many features were removed", function()
     notify("BOLT", #PRUNED .. " features pruned")
 end)
@@ -1954,7 +1938,6 @@ pcall(function()
     registerFeature("Universal Shield", { "getrawmetatable", "newcclosure" }, installUniversalShield)
     registerFeature("Delta Clamp", {}, function() installDeltaClamp(45) end)
     registerFeature("Remote Guard", { "getrawmetatable" }, installRemoteGuard)
-    registerFeature("Auto Network", {}, installAutoNetwork)
 
     UIS.InputBegan:Connect(function(input, gp)
         if gp then return end
